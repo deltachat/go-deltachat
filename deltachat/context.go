@@ -7,65 +7,22 @@ package deltachat
 import "C"
 
 import (
-	"sync"
+        "runtime"
 )
 
-var deltachatCbMutex sync.RWMutex
-
-type deltachatCallback func(
-	event C.int,
-	data1 C.uintptr_t,
-	data2 C.uintptr_t,
-) C.uintptr_t
-
-var deltachatCallbacks map[*C.dc_context_t]deltachatCallback = make(
-	map[*C.dc_context_t]deltachatCallback,
-)
-
-//export godeltachat_eventhandler_proxy
-func godeltachat_eventhandler_proxy(
-	context *C.dc_context_t,
-	event C.int,
-	data1 C.uintptr_t,
-	data2 C.uintptr_t,
-) C.uintptr_t {
-	deltachatCbMutex.RLock()
-
-	callback, ok := deltachatCallbacks[context]
-
-	deltachatCbMutex.RUnlock()
-
-	if !ok {
-		panic("dc_context_t callback was called but not set")
-	}
-
-	return callback(event, data1, data2)
-}
-
-func NewContext() *Context {
-	context := C.godeltachat_create_context()
+func NewContext(dbLocation string) *Context {
+	context := C.godeltachat_create_context(C.CString(dbLocation))
 
 	client := &Context{
 		context: context,
 	}
 
-	deltachatCbMutex.Lock()
-	deltachatCallbacks[context] = client.handleEvent
-	deltachatCbMutex.Unlock()
-
 	return client
 }
 
 type Context struct {
-	context      *C.dc_context_t
-	eventHandler EventHandler
+	context *C.dc_context_t
 }
-
-type EventHandler func(
-	event int,
-	data1 C.uintptr_t,
-	data2 C.uintptr_t,
-) int
 
 func (c *Context) SetConfig(key string, value string) {
 	cKey, cValue := C.CString(key), C.CString(value)
@@ -77,59 +34,18 @@ func (c *Context) GetConfig(key string) string {
 	return dcStringToGo(C.dc_get_config(c.context, C.CString(key)))
 }
 
-func (c *Context) Open(databaseLocation string) bool {
-	cDatabaseLocation := C.CString(databaseLocation)
-	defer freeCString(cDatabaseLocation)
-
-	return int(C.dc_open(c.context, cDatabaseLocation, nil)) > 0
-}
-
 func (c *Context) Configure() {
 	C.dc_configure(c.context)
 }
 
-func (c *Context) SetHandler(handler EventHandler) {
-	c.eventHandler = handler
-}
+func (c *Context) GetEventEmitter() EventEmitter {
+	cEmitter := C.dc_get_event_emitter(c.context)
 
-func (c *Context) handleEvent(
-	event C.int,
-	data1 C.uintptr_t,
-	data2 C.uintptr_t,
-) C.uintptr_t {
-	if c.eventHandler == nil {
-		return 0
+        e := EventEmitter{
+		emitter: cEmitter,
 	}
-
-	return C.uintptr_t(c.eventHandler(int(event), data1, data2))
-}
-
-func (c *Context) PerformIMAPRoutine() {
-	C.godeltachat_do_imap_routine(c.context)
-}
-
-func (c *Context) PerformSMTPRoutine() {
-	C.godeltachat_do_smtp_routine(c.context)
-}
-
-func (c *Context) PerformIMAPJobs() {
-	C.dc_perform_imap_jobs(c.context)
-}
-
-func (c *Context) PerformIMAPFetch() {
-	C.dc_perform_imap_fetch(c.context)
-}
-
-func (c *Context) PerformIMAPIdle() {
-	C.dc_perform_imap_idle(c.context)
-}
-
-func (c *Context) PerformSMTPJobs() {
-	C.dc_perform_smtp_jobs(c.context)
-}
-
-func (c *Context) PerformSMTPIdle() {
-	C.dc_perform_smtp_idle(c.context)
+        runtime.SetFinalizer(&e, (*EventEmitter).Free)
+        return e
 }
 
 func (c *Context) CreateChatByContactID(ID uint32) uint32 {
@@ -196,10 +112,6 @@ func (c *Context) AddDeviceMessage(label *string, message *Message) uint32 {
 	return msgID
 }
 
-func (c *Context) ArchiveChat(chatID uint32, archive int) {
-	C.dc_archive_chat(c.context, C.uint32_t(chatID), C.int(archive))
-}
-
 func (c *Context) BlockContact(contactID uint32, block int) {
 	C.dc_block_contact(c.context, C.uint32_t(contactID), C.int(block))
 }
@@ -212,10 +124,6 @@ func (c *Context) CheckQR(QR string) *Lot {
 	return &Lot{
 		lot: lot,
 	}
-}
-
-func (c *Context) Close() {
-	C.dc_close(c.context)
 }
 
 func (c *Context) Unref() {
@@ -267,10 +175,6 @@ func (c *Context) DeleteMessages(messageIDs []uint32, messageCount int) {
 	if messageCount > 0 {
 		C.dc_delete_msgs(c.context, (*C.uint32_t)(&messageIDs[0]), C.int(messageCount))
 	}
-}
-
-func (c *Context) EmptyServer(flags uint32) {
-	C.dc_empty_server(c.context, C.uint32_t(flags))
 }
 
 func (c *Context) ForwardMessages(messageIDs []uint32, messageCount int, chatID uint32) {
@@ -512,32 +416,12 @@ func (c *Context) InitiateKeyTransfer() {
 	C.dc_initiate_key_transfer(c.context)
 }
 
-func (c *Context) InterruptIMAPIdle() {
-	C.dc_interrupt_imap_idle(c.context)
-}
-
-func (c *Context) InterruptMvboxIdle() {
-	C.dc_interrupt_mvbox_idle(c.context)
-}
-
-func (c *Context) InterruptSentboxIdle() {
-	C.dc_interrupt_sentbox_idle(c.context)
-}
-
-func (c *Context) InterruptSMTPIdle() {
-	C.dc_interrupt_smtp_idle(c.context)
-}
-
 func (c *Context) IsConfigured() bool {
 	return int(C.dc_is_configured(c.context)) > 0
 }
 
 func (c *Context) IsContactInChat(chatID uint32, contactID uint32) bool {
 	return int(C.dc_is_contact_in_chat(c.context, C.uint32_t(chatID), C.uint32_t(contactID))) > 0
-}
-
-func (c *Context) IsOpen() bool {
-	return int(C.dc_is_open(c.context)) > 0
 }
 
 func (c *Context) IsSendingLocationsToChat(chatID uint32) bool {
@@ -556,10 +440,6 @@ func (c *Context) LookupContactIDByAddress(address string) uint32 {
 	defer freeCString(cAddr)
 
 	return uint32(C.dc_lookup_contact_id_by_addr(c.context, cAddr))
-}
-
-func (c *Context) MarkNoticedAllChats() {
-	C.dc_marknoticed_all_chats(c.context)
 }
 
 func (c *Context) MarkNoticedChat(chatID uint32) {
@@ -589,30 +469,6 @@ func MayBeValidAddress(address string) bool {
 
 func (c *Context) MaybeNetwork() {
 	C.dc_maybe_network(c.context)
-}
-
-func (c *Context) PerformMvboxFetch() {
-	C.dc_perform_mvbox_fetch(c.context)
-}
-
-func (c *Context) PerformMvboxIdle() {
-	C.dc_perform_mvbox_idle(c.context)
-}
-
-func (c *Context) PerformMvboxJobs() {
-	C.dc_perform_mvbox_jobs(c.context)
-}
-
-func (c *Context) PerformSentboxFetch() {
-	C.dc_perform_sentbox_fetch(c.context)
-}
-
-func (c *Context) PerformSentboxIdle() {
-	C.dc_perform_sentbox_idle(c.context)
-}
-
-func (c *Context) PerformSentboxJobs() {
-	C.dc_perform_sentbox_jobs(c.context)
 }
 
 func (c *Context) PrepareMessage(chatID uint32, message *Message) uint32 {
@@ -682,17 +538,6 @@ func (c *Context) SetStockTranslation(stockID uint32, message string) bool {
 	defer freeCString(cMessage)
 
 	return int(C.dc_set_stock_translation(c.context, C.uint32_t(stockID), cMessage)) > 0
-}
-
-func (c *Context) StarMessages(messageIDs []uint32, messageCount int, star int) {
-	if messageCount > 0 {
-		C.dc_star_msgs(
-			c.context,
-			(*C.uint32_t)(&messageIDs[0]),
-			C.int(messageCount),
-			C.int(star),
-		)
-	}
 }
 
 func (c *Context) StopOngoingProcess() {

@@ -1,5 +1,12 @@
 package deltachat
 
+// #include <deltachat.h>
+import "C"
+
+type Event struct {
+	event *C.dc_event_t
+}
+
 const EVENT_TYPES_DATA1_IS_INT = DC_EVENT_CHAT_MODIFIED |
 	DC_EVENT_CONFIGURE_PROGRESS |
 	DC_EVENT_CONTACTS_CHANGED |
@@ -38,32 +45,21 @@ var dataTypeNames = map[uint8]string{
 	DATA_TYPE_NIL:    "nil",
 }
 
-func Data1TypeForEvent(event int) uint8 {
-	if event == DC_EVENT_IMEX_FILE_WRITTEN || event == DC_EVENT_FILE_COPIED {
-		return DATA_TYPE_STRING
-	}
-
-	if (EVENT_TYPES_DATA1_IS_INT & event) == event {
-		return DATA_TYPE_INT
-	}
-
-	return DATA_TYPE_NIL
+func (e *Event) GetId() int {
+        return int(C.dc_event_get_id(e.event))
 }
 
-func Data2TypeForEvent(event int) uint8 {
-	if event >= 100 && event <= 499 {
-		return DATA_TYPE_STRING
-	}
-
-	if (EVENT_TYPES_DATA2_IS_INT & event) == event {
-		return DATA_TYPE_INT
-	}
-
-	return DATA_TYPE_NIL
+func (e *Event) GetData1Int() int {
+        return int(C.dc_event_get_data1_int(e.event))
 }
 
-type Event struct {
-	EventType int
-	Data1     Data
-	Data2     Data
+func (e *Event) GetData2String() *string {
+        s := C.dc_event_get_data2_str(e.event)
+        if s != nil {
+                res := C.GoString(s)
+                C.dc_str_unref(s)
+                return &res
+        } else {
+                return nil
+        }
 }

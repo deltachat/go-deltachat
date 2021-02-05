@@ -22,8 +22,6 @@ type Client struct {
 	eventReceiverQuit chan struct{}
 	handlerMap        map[int]ClientEventHandler
 	handlerMapMutex   sync.RWMutex
-	smtpWorker        worker
-	imapWorker        worker
 	logger            Logger
 }
 
@@ -44,19 +42,6 @@ func (c *Client) On(event int, handler ClientEventHandler) {
 	c.handlerMapMutex.Lock()
 	c.handlerMap[event] = handler
 	c.handlerMapMutex.Unlock()
-}
-
-func (c *Client) queueEvent(event int, data1 C.uintptr_t, data2 C.uintptr_t) int {
-	data1Wrapper := NewData1(event, data1)
-	data2Wrapper := NewData2(event, data2)
-
-	c.eventChan <- &Event{
-		EventType: event,
-		Data1:     *data1Wrapper,
-		Data2:     *data2Wrapper,
-	}
-
-	return 0
 }
 
 // Goroutine that listens for incoming events. Should be started for callbacks to be
@@ -91,16 +76,15 @@ func (c *Client) handleError(event *Event) {
 }
 
 func (c *Client) dcErrorString(event *Event) string {
-	name := eventNames[event.EventType]
+	name := eventNames[event.GetId()]
 
-	str, err := event.Data2.String()
+	str := event.GetData2String()
 
-	if err != nil {
+	if str == nil {
 		c.logger.Println(
 			fmt.Sprintf(
-				"Unexpected data type while handeling %s:",
+				"Unexpected data type while handling %s",
 				name,
-				err.Error(),
 			),
 		)
 
@@ -111,7 +95,7 @@ func (c *Client) dcErrorString(event *Event) string {
 }
 
 func (c *Client) handleEvent(event *Event) {
-	eventType := event.EventType
+	eventType := event.GetId()
 
 	c.handlerMapMutex.RLock()
 	handler, ok := c.handlerMap[eventType]
@@ -131,42 +115,23 @@ func (c *Client) handleEvent(event *Event) {
 	handler(c.context, event)
 }
 
-func (c *Client) imapRoutine() {
-	context := c.context
-
-	context.PerformIMAPRoutine()
-}
-
-func (c *Client) smtpRoutine() {
-	context := c.context
-
-	context.PerformSMTPRoutine()
-}
-
 func (c *Client) Open(dbLocation string) {
-	context := NewContext()
+	context := NewContext(dbLocation)
 
 	c.startEventReceiver()
 
-	context.SetHandler(c.queueEvent)
-	context.Open(dbLocation)
-
-	c.imapWorker = newWorker("IMAP", c.imapRoutine, context.InterruptIMAPIdle, c.logger)
-	c.smtpWorker = newWorker("SMTP", c.smtpRoutine, context.InterruptSMTPIdle, c.logger)
-
-	c.StartWorkers()
-
 	c.context = context
-}
 
-func (c *Client) StartWorkers() {
-	c.imapWorker.Start()
-	c.smtpWorker.Start()
-}
-
-func (c *Client) StopWorkers() {
-	c.imapWorker.Stop()
-	c.smtpWorker.Stop()
+        go func() {
+                emitter := c.context.GetEventEmitter()
+                for {
+                        event := emitter.GetNextEvent()
+                        if event == nil {
+                                break
+                        }
+                        c.eventChan <- event
+                }
+        }()
 }
 
 func (c *Client) Configure() {
@@ -190,12 +155,7 @@ func (c *Client) GetConfig(key string) string {
 }
 
 func (c *Client) Close() {
-	c.logger.Println("Stopping workers")
-	c.StopWorkers()
-
-	c.logger.Println("Closing context")
-	(*c.context).Close()
-
+	// TODO stop IO
 	c.logger.Println("Unreffing context")
 	(*c.context).Unref()
 

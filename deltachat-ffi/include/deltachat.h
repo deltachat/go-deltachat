@@ -12,6 +12,7 @@ extern "C" {
 
 
 typedef struct _dc_context  dc_context_t;
+typedef struct _dc_accounts dc_accounts_t;
 typedef struct _dc_array    dc_array_t;
 typedef struct _dc_chatlist dc_chatlist_t;
 typedef struct _dc_chat     dc_chat_t;
@@ -19,6 +20,9 @@ typedef struct _dc_msg      dc_msg_t;
 typedef struct _dc_contact  dc_contact_t;
 typedef struct _dc_lot      dc_lot_t;
 typedef struct _dc_provider dc_provider_t;
+typedef struct _dc_event    dc_event_t;
+typedef struct _dc_event_emitter dc_event_emitter_t;
+typedef struct _dc_accounts_event_emitter dc_accounts_event_emitter_t;
 
 
 /**
@@ -30,62 +34,41 @@ typedef struct _dc_provider dc_provider_t;
  *
  * Let's start.
  *
- * First of all, you have to **define an event-handler-function**
- * that is called by the library on specific events
- * (eg. when the configuration is done or when fresh messages arrive).
- * With this function you can create a Delta Chat context then:
+ * First of all, you have to **create a context object**
+ * bound to a database.
+ * The database is a normal SQLite file with a "blob directory" beside it.
+ * This will create "example.db" database and "example.db-blobs"
+ * directory if they don't exist already:
  *
  * ~~~
- * #include <deltachat.h>
+ * dc_context_t* context = dc_context_new(NULL, "example.db", NULL);
+ * ~~~
  *
- * uintptr_t event_handler_func(dc_context_t* context, int event,
- *                              uintptr_t data1, uintptr_t data2)
+ * After that, make sure you can **receive events from the context**.
+ * For that purpose, create an event emitter you can ask for events.
+ * If there is no event, the emitter will wait until there is one,
+ * so, in many situations, you will do this in a thread:
+ *
+ * ~~~
+ * void* event_handler(void* context)
  * {
- *     return 0; // for unhandled events, it is always safe to return 0
- * }
- *
- * dc_context_t* context = dc_context_new(event_handler_func, NULL, NULL);
- * ~~~
- *
- * After that, you should make sure,
- * sending and receiving jobs are processed as needed.
- * For this purpose, you have to **create two threads:**
- *
- * ~~~
- * #include <pthread.h>
- *
- * void* imap_thread_func(void* context)
- * {
- *     while (true) {
- *         dc_perform_imap_jobs(context);
- *         dc_perform_imap_fetch(context);
- *         dc_perform_imap_idle(context);
+ *     dc_event_emitter_t* emitter = dc_get_event_emitter(context);
+ *     dc_event_t* event;
+ *     while ((event = dc_get_next_event(emitter)) != NULL) {
+ *         // use the event as needed, e.g. dc_event_get_id() returns the type.
+ *         // once you're done, unref the event to avoid memory leakage:
+ *         dc_event_unref(event);
  *     }
+ *     dc_event_emitter_unref(emitter);
  * }
  *
- * void* smtp_thread_func(void* context)
- * {
- *     while (true) {
- *         dc_perform_smtp_jobs(context);
- *         dc_perform_smtp_idle(context);
- *     }
- * }
- *
- * static pthread_t imap_thread, smtp_thread;
- * pthread_create(&imap_thread, NULL, imap_thread_func, context);
- * pthread_create(&smtp_thread, NULL, smtp_thread_func, context);
+ * static pthread_t event_thread;
+ * pthread_create(&event_thread, NULL, event_handler, context);
  * ~~~
  *
  * The example above uses "pthreads",
  * however, you can also use anything else for thread handling.
- * All deltachat-core-functions, unless stated otherwise, are thread-safe.
- *
- * After that you can  **define and open a database.**
- * The database is a normal sqlite-file and is created as needed:
- *
- * ~~~
- * dc_open(context, "example.db", NULL);
- * ~~~
+ * All deltachat-core functions, unless stated otherwise, are thread-safe.
  *
  * Now you can **configure the context:**
  *
@@ -96,14 +79,21 @@ typedef struct _dc_provider dc_provider_t;
  * dc_configure(context);
  * ~~~
  *
- * dc_configure() returns immediately, the configuration itself may take a while
- * and is done by a job in the imap-thread you've defined above.
+ * dc_configure() returns immediately.
+ * The configuration itself runs in the background and may take a while.
  * Once done, the #DC_EVENT_CONFIGURE_PROGRESS reports success
- * to the event_handler_func() that is also defined above.
+ * to the event_handler() you've defined above.
  *
- * The configuration result is saved in the database,
- * on subsequent starts it is not needed to call dc_configure()
+ * The configuration result is saved in the database.
+ * On subsequent starts it is not needed to call dc_configure()
  * (you can check this using dc_is_configured()).
+ *
+ * On a successfully configured context,
+ * you can finally **connect to the servers:**
+ *
+ * ~~~
+ * dc_start_io(context);
+ * ~~~
  *
  * Now you can **send the first message:**
  *
@@ -116,13 +106,13 @@ typedef struct _dc_provider dc_provider_t;
  * ~~~
  *
  * dc_send_text_msg() returns immediately;
- * the sending itself is done by a job in the smtp-thread you've defined above.
- * If you check the testing address (bob)
- * and you should have received a normal email.
- * Answer this email in any email program with "Got it!"
- * and the imap-thread you've create above will **receive the message**.
+ * the sending itself is done in the background.
+ * If you check the testing address (bob),
+ * you should receive a normal email.
+ * Answer this email in any email program with "Got it!",
+ * and the IO you started above will **receive the message**.
  *
- * You can then **list all messages** of a chat as follow:
+ * You can then **list all messages** of a chat as follows:
  *
  * ~~~
  * dc_array_t* msglist = dc_get_chat_msgs(context, chat_id, 0, 0);
@@ -162,20 +152,7 @@ typedef struct _dc_provider dc_provider_t;
  * - Strings in function arguments or return values are usually UTF-8 encoded.
  *
  * - The issue-tracker for the core library is here:
- *   <https://github.com/deltachat/deltachat-core/issues>
- *
- * The following points are important mainly
- * for the authors of the library itself:
- *
- * - For indentation, use tabs.
- *   Alignments that are not placed at the beginning of a line
- *   should be done with spaces.
- *
- * - For padding between functions,
- *   classes etc. use 2 empty lines
- *
- * - Source files are encoded as UTF-8 with Unix line endings
- *   (a simple `LF`, `0x0A` or `\n`)
+ *   <https://github.com/deltachat/deltachat-core-rust/issues>
  *
  * If you need further assistance,
  * please do not hesitate to contact us
@@ -199,20 +176,6 @@ typedef struct _dc_provider dc_provider_t;
  * settings.
  */
 
-
-/**
- * Callback function that should be given to dc_context_new().
- *
- * @memberof dc_context_t
- * @param context The context object as returned by dc_context_new().
- * @param event one of the @ref DC_EVENT constants
- * @param data1 depends on the event parameter
- * @param data2 depends on the event parameter
- * @return return 0 unless stated otherwise in the event parameter documentation
- */
-typedef uintptr_t (*dc_callback_t) (dc_context_t* context, int event, uintptr_t data1, uintptr_t data2);
-
-
 // create/open/config/information
 
 /**
@@ -220,105 +183,73 @@ typedef uintptr_t (*dc_callback_t) (dc_context_t* context, int event, uintptr_t 
  * opened, connected and mails are fetched.
  *
  * @memberof dc_context_t
- * @param cb a callback function that is called for events (update,
- *     state changes etc.) and to get some information from the client (eg. translation
- *     for a given string).
- *     See @ref DC_EVENT for a list of possible events that may be passed to the callback.
- *     - The callback MAY be called from _any_ thread, not only the main/GUI thread!
- *     - The callback MUST NOT call any dc_* and related functions unless stated
- *       otherwise!
- *     - The callback SHOULD return _fast_, for GUI updates etc. you should
- *       post yourself an asynchronous message to your GUI thread, if needed.
- *     - If not mentioned otherweise, the callback should return 0.
- * @param userdata can be used by the client for any purpuse.  He finds it
- *     later in dc_get_userdata().
- * @param os_name is only for decorative use
- *     and is shown eg. in the `X-Mailer:` header
- *     in the form "Delta Chat Core <version>/<os_name>".
+ * @param os_name is only for decorative use.
  *     You can give the name of the app, the operating system,
  *     the used environment and/or the version here.
- *     It is okay to give NULL, in this case `X-Mailer:` header
- *     is set to "Delta Chat Core <version>".
+ * @param dbfile The file to use to store the database,
+ *     something like `~/file` won't work, use absolute paths.
+ * @param blobdir Deprecated, pass NULL or an empty string here.
  * @return A context object with some public members.
  *     The object must be passed to the other context functions
  *     and must be freed using dc_context_unref() after usage.
+ *
+ * If you want to use multiple context objects at the same time,
+ * this can be managed using dc_accounts_t.
  */
-dc_context_t*   dc_context_new               (dc_callback_t cb, void* userdata, const char* os_name);
+dc_context_t*   dc_context_new               (const char* os_name, const char* dbfile, const char* blobdir);
 
 
 /**
  * Free a context object.
- * If app runs can only be terminated by a forced kill, this may be superfluous.
- * Before the context object is freed, connections to SMTP, IMAP and database
- * are closed. You can also do this explicitly by calling dc_close() on your own
- * before calling dc_context_unref().
+ *
+ * You have to call this function
+ * also for accounts returned by dc_accounts_get_account() or dc_accounts_get_selected_account().
  *
  * @memberof dc_context_t
- * @param context The context object as created by dc_context_new().
+ * @param context The context object as created by dc_context_new(),
+ *     dc_accounts_get_account() or dc_accounts_get_selected_account().
  *     If NULL is given, nothing is done.
- * @return None.
  */
 void            dc_context_unref             (dc_context_t* context);
 
 
 /**
- * Get user data associated with a context object.
+ * Get the ID of a context object.
+ * Each context has an ID assigned.
+ * If the context was created through the dc_accounts_t account manager,
+ * the ID is unique, no other context handled by the account manager will have the same ID.
+ * If the context was created by dc_context_new(), a random ID is assigned.
  *
  * @memberof dc_context_t
- * @param context The context object as created by dc_context_new().
- * @return User data, this is the second parameter given to dc_context_new().
+ * @param context The context object as created e.g. by dc_accounts_get_account() or dc_context_new().
+ * @return The context-id.
  */
-void*           dc_get_userdata              (dc_context_t* context);
+uint32_t        dc_get_id                    (dc_context_t* context);
 
 
 /**
- * Open context database.  If the given file does not exist, it is
- * created and can be set up using dc_set_config() afterwards.
+ * Create the event emitter that is used to receive events.
+ * The library will emit various @ref DC_EVENT events, such as "new message", "message read" etc.
+ * To get these events, you have to create an event emitter using this function
+ * and call dc_get_next_event() on the emitter.
  *
  * @memberof dc_context_t
  * @param context The context object as created by dc_context_new().
- * @param dbfile The file to use to store the database, something like `~/file` won't
- *     work on all systems, if in doubt, use absolute paths.
- * @param blobdir A directory to store the blobs in; a trailing slash is not needed.
- *     If you pass NULL or the empty string, deltachat-core creates a directory
- *     beside _dbfile_ with the same name and the suffix `-blobs`.
- * @return 1 on success, 0 on failure
- *     eg. if the file is not writable
- *     or if there is already a database opened for the context.
- */
-int             dc_open                      (dc_context_t* context, const char* dbfile, const char* blobdir);
-
-
-/**
- * Close context database opened by dc_open().
- * Before this, connections to SMTP and IMAP are closed; these connections
- * are started automatically as needed eg. by sending for fetching messages.
- * This function is also implicitly called by dc_context_unref().
- * Multiple calls to this functions are okay, the function takes care not
- * to free objects twice.
+ * @return Returns the event emitter, NULL on errors.
+ *     Must be freed using dc_event_emitter_unref() after usage.
  *
- * @memberof dc_context_t
- * @param context The context object as created by dc_context_new().
- * @return None.
+ * Note: Use only one event emitter per context.
+ * Having more than one event emitter running at the same time on the same context
+ * will result in events being randomly delivered to one of the emitters.
  */
-void            dc_close                     (dc_context_t* context);
-
-
-/**
- * Check if the context database is open.
- *
- * @memberof dc_context_t
- * @param context The context object as created by dc_context_new().
- * @return 0=context is not open, 1=context is open.
- */
-int             dc_is_open                   (const dc_context_t* context);
+dc_event_emitter_t* dc_get_event_emitter(dc_context_t* context);
 
 
 /**
  * Get the blob directory.
  *
  * @memberof dc_context_t
- * @param context The context object as created by dc_context_new().
+ * @param context The context object.
  * @return Blob directory associated with the context object, empty string if unset or on errors. NULL is never returned.
  *     The returned string must be released using dc_str_unref().
  */
@@ -333,28 +264,39 @@ char*           dc_get_blobdir               (const dc_context_t* context);
  * - `mail_user`    = IMAP-username, guessed if left out
  * - `mail_pw`      = IMAP-password (always needed)
  * - `mail_port`    = IMAP-port, guessed if left out
+ * - `mail_security`= IMAP-socket, one of @ref DC_SOCKET, defaults to #DC_SOCKET_AUTO
  * - `send_server`  = SMTP-server, guessed if left out
  * - `send_user`    = SMTP-user, guessed if left out
  * - `send_pw`      = SMTP-password, guessed if left out
  * - `send_port`    = SMTP-port, guessed if left out
+ * - `send_security`= SMTP-socket, one of @ref DC_SOCKET, defaults to #DC_SOCKET_AUTO
  * - `server_flags` = IMAP-/SMTP-flags as a combination of @ref DC_LP flags, guessed if left out
  * - `imap_certificate_checks` = how to check IMAP certificates, one of the @ref DC_CERTCK flags, defaults to #DC_CERTCK_AUTO (0)
  * - `smtp_certificate_checks` = how to check SMTP certificates, one of the @ref DC_CERTCK flags, defaults to #DC_CERTCK_AUTO (0)
- * - `displayname`  = Own name to use when sending messages.  MUAs are allowed to spread this way eg. using CC, defaults to empty
- * - `selfstatus`   = Own status to display eg. in email footers, defaults to a standard text
- * - `selfavatar`   = File containing avatar. Will be copied to blob directory.
+ * - `displayname`  = Own name to use when sending messages.  MUAs are allowed to spread this way e.g. using CC, defaults to empty
+ * - `selfstatus`   = Own status to display e.g. in email footers, defaults to a standard text defined by #DC_STR_STATUSLINE
+ * - `selfavatar`   = File containing avatar. Will immediately be copied to the 
+ *                    `blobdir`; the original image will not be needed anymore.
  *                    NULL to remove the avatar.
- *                    It is planned for future versions
- *                    to send this image together with the next messages.
+ *                    As for `displayname` and `selfstatus`, also the avatar is sent to the recipients.
+ *                    To save traffic, however, the avatar is attached only as needed
+ *                    and also recoded to a reasonable size.
  * - `e2ee_enabled` = 0=no end-to-end-encryption, 1=prefer end-to-end-encryption (default)
  * - `mdns_enabled` = 0=do not send or request read receipts,
  *                    1=send and request read receipts (default)
+ * - `bcc_self`     = 0=do not send a copy of outgoing messages to self (default),
+ *                    1=send a copy of outgoing messages to self.
+ *                    Sending messages to self is needed for a proper multi-account setup,
+ *                    however, on the other hand, may lead to unwanted notifications in non-delta clients.
  * - `inbox_watch`  = 1=watch `INBOX`-folder for changes (default),
- *                    0=do not watch the `INBOX`-folder
+ *                    0=do not watch the `INBOX`-folder,
+ *                    changes require restarting IO by calling dc_stop_io() and then dc_start_io().
  * - `sentbox_watch`= 1=watch `Sent`-folder for changes (default),
- *                    0=do not watch the `Sent`-folder
+ *                    0=do not watch the `Sent`-folder,
+ *                    changes require restarting IO by calling dc_stop_io() and then dc_start_io().
  * - `mvbox_watch`  = 1=watch `DeltaChat`-folder for changes (default),
- *                    0=do not watch the `DeltaChat`-folder
+ *                    0=do not watch the `DeltaChat`-folder,
+ *                    changes require restarting IO by calling dc_stop_io() and then dc_start_io().
  * - `mvbox_move`   = 1=heuristically detect chat-messages
  *                    and move them to the `DeltaChat`-folder,
  *                    0=do not move chat-messages
@@ -364,14 +306,49 @@ char*           dc_get_blobdir               (const dc_context_t* context);
  *                    also show all mails of confirmed contacts,
  *                    DC_SHOW_EMAILS_ALL (2)=
  *                    also show mails of unconfirmed contacts in the deaddrop.
+ * - `key_gen_type` = DC_KEY_GEN_DEFAULT (0)=
+ *                    generate recommended key type (default),
+ *                    DC_KEY_GEN_RSA2048 (1)=
+ *                    generate RSA 2048 keypair
+ *                    DC_KEY_GEN_ED25519 (2)=
+ *                    generate Ed25519 keypair
  * - `save_mime_headers` = 1=save mime headers
  *                    and make dc_get_mime_headers() work for subsequent calls,
  *                    0=do not save mime headers (default)
+ * - `delete_device_after` = 0=do not delete messages from device automatically (default),
+ *                    >=1=seconds, after which messages are deleted automatically from the device.
+ *                    Messages in the "saved messages" chat (see dc_chat_is_self_talk()) are skipped.
+ *                    Messages are deleted whether they were seen or not, the UI should clearly point that out.
+ *                    See also dc_estimate_deletion_cnt().
+ * - `delete_server_after` = 0=do not delete messages from server automatically (default),
+ *                    1=delete messages directly after receiving from server, mvbox is skipped.
+ *                    >1=seconds, after which messages are deleted automatically from the server, mvbox is used as defined.
+ *                    "Saved messages" are deleted from the server as well as
+ *                    emails matching the `show_emails` settings above, the UI should clearly point that out.
+ *                    See also dc_estimate_deletion_cnt().
+ * - `media_quality` = DC_MEDIA_QUALITY_BALANCED (0) =
+ *                    good outgoing images/videos/voice quality at reasonable sizes (default)
+ *                    DC_MEDIA_QUALITY_WORSE (1)
+ *                    allow worse images/videos/voice quality to gain smaller sizes,
+ *                    suitable for providers or areas known to have a bad connection.
+ *                    The library uses the `media_quality` setting to use different defaults
+ *                    for recoding images sent with type #DC_MSG_IMAGE.
+ *                    If needed, recoding other file types is up to the UI.
+ * - `webrtc_instance` = webrtc instance to use for videochats in the form
+ *                    `[basicwebrtc:|jitsi:]https://example.com/subdir#roomname=$ROOM`
+ *                    if the url is prefixed by `basicwebrtc`, the server is assumed to be of the type
+ *                    https://github.com/cracker0dks/basicwebrtc which some UIs have native support for.
+ *                    The type `jitsi:` may be handled by external apps.
+ *                    If no type is prefixed, the videochat is handled completely in a browser.
+ * - `bot`          = Set to "1" if this is a bot. E.g. prevents adding the "Device messages" and "Saved messages" chats.
+ * - `fetch_existing_msgs` = 1=fetch most recent existing messages on configure (default),
+ *                    0=do not fetch existing messages on configure.
+ *                    In both cases, existing recipients are added to the contact database.
  *
  * If you want to retrieve a value, use dc_get_config().
  *
  * @memberof dc_context_t
- * @param context The context object
+ * @param context The context object.
  * @param key The option to change, see above.
  * @param value The value to save for "key"
  * @return 0=failure, 1=success
@@ -386,22 +363,23 @@ int             dc_set_config                (dc_context_t* context, const char*
  * Beside the options shown at dc_set_config(),
  * this function can be used to query some global system values:
  *
- * - `sys.version`  = get the version string eg. as `1.2.3` or as `1.2.3special4`
+ * - `sys.version`  = get the version string e.g. as `1.2.3` or as `1.2.3special4`
  * - `sys.msgsize_max_recommended` = maximal recommended attachment size in bytes.
- *                    All possible overheads are already subtracted and this value can be used eg. for direct comparison
+ *                    All possible overheads are already subtracted and this value can be used e.g. for direct comparison
  *                    with the size of a file the user wants to attach. If an attachment is larger than this value,
  *                    an error (no warning as it should be shown to the user) is logged but the attachment is sent anyway.
  * - `sys.config_keys` = get a space-separated list of all config-keys available.
  *                    The config-keys are the keys that can be passed to the parameter `key` of this function.
  *
  * @memberof dc_context_t
- * @param context The context object as created by dc_context_new(). For querying system values, this can be NULL.
+ * @param context The context object. For querying system values, this can be NULL.
  * @param key The key to query.
  * @return Returns current value of "key", if "key" is unset, the default
  *     value is returned.  The returned value must be released using dc_str_unref(), NULL is never
  *     returned.  If there is an error an empty string will be returned.
  */
 char*           dc_get_config                (dc_context_t* context, const char* key);
+
 
 /**
  * Set stock string translation.
@@ -410,11 +388,28 @@ char*           dc_get_config                (dc_context_t* context, const char*
  *
  * @memberof dc_context_t
  * @param context The context object
- * @param stock_id   the integer id of the stock message (DC_STR_*)
+ * @param stock_id   the integer id of the stock message, one of the @ref DC_STR constants
  * @param stock_msg  the message to be used
  * @return int (==0 on error, 1 on success)
  */
 int             dc_set_stock_translation(dc_context_t* context, uint32_t stock_id, const char* stock_msg);
+
+
+/**
+ * Set configuration values from a QR code.
+ * Before this function is called, dc_check_qr() should confirm the type of the
+ * QR code is DC_QR_ACCOUNT or DC_QR_WEBRTC_INSTANCE.
+ *
+ * Internally, the function will call dc_set_config() with the appropriate keys,
+ * e.g. `addr` and `mail_pw` for DC_QR_ACCOUNT
+ * or `webrtc_instance` for DC_QR_WEBRTC_INSTANCE.
+ *
+ * @memberof dc_context_t
+ * @param context The context object
+ * @param qr scanned QR code
+ * @return int (==0 on error, 1 on success)
+ */
+int             dc_set_config_from_qr   (dc_context_t* context, const char* qr);
 
 
 /**
@@ -428,10 +423,10 @@ int             dc_set_stock_translation(dc_context_t* context, uint32_t stock_i
  * included when however.
  *
  * @memberof dc_context_t
- * @param context The context as created by dc_context_new().
+ * @param context The context object.
  * @return String which must be released using dc_str_unref() after usage.  Never returns NULL.
  */
-char*           dc_get_info                  (dc_context_t* context);
+char*           dc_get_info                  (const dc_context_t* context);
 
 
 /**
@@ -450,7 +445,7 @@ char*           dc_get_info                  (dc_context_t* context);
  * dc_configure() can be called as usual afterwards.
  *
  * @memberof dc_context_t
- * @param context The context object as created by dc_context_new().
+ * @param context The context object.
  * @param addr E-mail address the user has entered.
  *     In case the user selects a different e-mail-address during
  *     authorization, this is corrected in dc_configure()
@@ -470,9 +465,7 @@ char*           dc_get_oauth2_url            (dc_context_t* context, const char*
 
 /**
  * Configure a context.
- * For this purpose, the function creates a job
- * that is executed in the IMAP-thread then;
- * this requires to call dc_perform_imap_jobs() regularly.
+ * During configuration IO must not be started, if needed stop IO using dc_stop_io() first.
  * If the context is already configured,
  * this function will try to change the configuration.
  *
@@ -506,8 +499,7 @@ char*           dc_get_oauth2_url            (dc_context_t* context, const char*
  * and parameters as `addr`, `mail_pw` etc. are set to that.
  *
  * @memberof dc_context_t
- * @param context The context object as created by dc_context_new().
- * @return None.
+ * @param context The context object.
  *
  * There is no need to call dc_configure() on every program start,
  * the configuration result is saved in the database
@@ -530,326 +522,86 @@ void            dc_configure                 (dc_context_t* context);
  * to enter some settings and dc_configure() is called in a thread then.
  *
  * @memberof dc_context_t
- * @param context The context object as created by dc_context_new().
+ * @param context The context object.
  * @return 1=context is configured and can be used;
  *     0=context is not configured and a configuration by dc_configure() is required.
  */
-int             dc_is_configured             (const dc_context_t* context);
+int             dc_is_configured   (const dc_context_t* context);
 
 
 /**
- * Execute pending imap-jobs.
- * This function and dc_perform_imap_fetch() and dc_perform_imap_idle()
- * must be called from the same thread, typically in a loop.
+ * Start job and IMAP/SMTP tasks.
+ * If IO is already running, nothing happens.
  *
- * Example:
- *
- *     void* imap_thread_func(void* context)
- *     {
- *         while (true) {
- *             dc_perform_imap_jobs(context);
- *             dc_perform_imap_fetch(context);
- *             dc_perform_imap_idle(context);
- *         }
- *     }
- *
- *     // start imap-thread that runs forever
- *     pthread_t imap_thread;
- *     pthread_create(&imap_thread, NULL, imap_thread_func, context);
- *
- *     ... program runs ...
- *
- *     // network becomes available again -
- *     // the interrupt causes dc_perform_imap_idle() in the thread above
- *     // to return so that jobs are executed and messages are fetched.
- *     dc_maybe_network(context);
+ * If the context was created by the dc_accounts_t account manager,
+ * use dc_accounts_start_io() instead of this function.
  *
  * @memberof dc_context_t
- * @param context The context as created by dc_context_new().
- * @return None.
+ * @param context The context object as created by dc_context_new().
  */
-void            dc_perform_imap_jobs         (dc_context_t* context);
-
+void            dc_start_io     (dc_context_t* context);
 
 /**
- * Fetch new messages, if any.
- * This function and dc_perform_imap_jobs() and dc_perform_imap_idle() must be called from the same thread,
- * typically in a loop.
+ * Stop job, IMAP, SMTP and other tasks and return when they
+ * are finished.
  *
- * See dc_perform_imap_jobs() for an example.
+ * Even if IO is not running, there may be pending tasks,
+ * so this function should always be called before releasing
+ * context to ensure clean termination of event loop.
+ *
+ * If the context was created by the dc_accounts_t account manager,
+ * use dc_accounts_stop_io() instead of this function.
  *
  * @memberof dc_context_t
- * @param context The context as created by dc_context_new().
- * @return None.
+ * @param context The context object as created by dc_context_new().
  */
-void            dc_perform_imap_fetch        (dc_context_t* context);
-
+void            dc_stop_io(dc_context_t* context);
 
 /**
- * Wait for messages or jobs.
- * This function and dc_perform_imap_jobs() and dc_perform_imap_fetch() must be called from the same thread,
- * typically in a loop.
+ * This function should be called when there is a hint
+ * that the network is available again,
+ * e.g. as a response to system event reporting network availability.
+ * The library will try to send pending messages out immediately.
  *
- * You should call this function directly after calling dc_perform_imap_fetch().
+ * Moreover, to have a reliable state
+ * when the app comes to foreground with network available,
+ * it may be reasonable to call the function also at that moment.
  *
- * See dc_perform_imap_jobs() for an example.
+ * It is okay to call the function unconditionally when there is
+ * network available, however, calling the function
+ * _without_ having network may interfere with the backoff algorithm
+ * and will led to let the jobs fail faster, with fewer retries
+ * and may avoid messages being sent out.
+ *
+ * Finally, if the context was created by the dc_accounts_t account manager,
+ * use dc_accounts_maybe_network() instead of this function.
  *
  * @memberof dc_context_t
  * @param context The context as created by dc_context_new().
- * @return None.
- */
-void            dc_perform_imap_idle         (dc_context_t* context);
-
-
-/**
- * Interrupt waiting for imap-jobs.
- * If dc_perform_imap_jobs(), dc_perform_imap_fetch() and dc_perform_imap_idle() are called in a loop,
- * calling this function causes imap-jobs to be executed and messages to be fetched.
- *
- * dc_interrupt_imap_idle() does _not_ interrupt dc_perform_imap_jobs() or dc_perform_imap_fetch().
- * If the imap-thread is inside one of these functions when dc_interrupt_imap_idle() is called, however,
- * the next call of the imap-thread to dc_perform_imap_idle() is interrupted immediately.
- *
- * Internally, this function is called whenever a imap-jobs should be processed
- * (delete message, markseen etc.).
- *
- * When you need to call this function just because to get jobs done after network changes,
- * use dc_maybe_network() instead.
- *
- * @memberof dc_context_t
- * @param context The context as created by dc_context_new().
- * @return None.
- */
-void            dc_interrupt_imap_idle       (dc_context_t* context);
-
-
-/**
- * Execute pending mvbox-jobs.
- * This function and dc_perform_mvbox_fetch() and dc_perform_mvbox_idle()
- * must be called from the same thread, typically in a loop.
- *
- * Example:
- *
- *     void* mvbox_thread_func(void* context)
- *     {
- *         while (true) {
- *             dc_perform_mvbox_jobs(context);
- *             dc_perform_mvbox_fetch(context);
- *             dc_perform_mvbox_idle(context);
- *         }
- *     }
- *
- *     // start mvbox-thread that runs forever
- *     pthread_t mvbox_thread;
- *     pthread_create(&mvbox_thread, NULL, mvbox_thread_func, context);
- *
- *     ... program runs ...
- *
- *     // network becomes available again -
- *     // the interrupt causes dc_perform_mvbox_idle() in the thread above
- *     // to return so that jobs are executed and messages are fetched.
- *     dc_maybe_network(context);
- *
- * @memberof dc_context_t
- * @param context The context as created by dc_context_new().
- * @return None.
- */
-void            dc_perform_mvbox_jobs         (dc_context_t* context);
-
-
-/**
- * Fetch new messages from the MVBOX, if any.
- * The MVBOX is a folder on the account where chat messages are moved to.
- * The moving is done to not disturb shared accounts that are used by both,
- * Delta Chat and a classical MUA.
- *
- * @memberof dc_context_t
- * @param context The context as created by dc_context_new().
- * @return None.
- */
-void            dc_perform_mvbox_fetch       (dc_context_t* context);
-
-
-/**
- * Wait for messages or jobs in the MVBOX-thread.
- * This function and dc_perform_mvbox_fetch().
- * must be called from the same thread, typically in a loop.
- *
- * You should call this function directly after calling dc_perform_mvbox_fetch().
- *
- * See dc_perform_mvbox_fetch() for an example.
- *
- * @memberof dc_context_t
- * @param context The context as created by dc_context_new().
- * @return None.
- */
-void            dc_perform_mvbox_idle        (dc_context_t* context);
-
-
-/**
- * Interrupt waiting for MVBOX-fetch.
- * dc_interrupt_mvbox_idle() does _not_ interrupt dc_perform_mvbox_fetch().
- * If the MVBOX-thread is inside this function when dc_interrupt_mvbox_idle() is called, however,
- * the next call of the MVBOX-thread to dc_perform_mvbox_idle() is interrupted immediately.
- *
- * Internally, this function is called whenever a imap-jobs should be processed.
- *
- * When you need to call this function just because to get jobs done after network changes,
- * use dc_maybe_network() instead.
- *
- * @memberof dc_context_t
- * @param context The context as created by dc_context_new().
- * @return None.
- */
-void            dc_interrupt_mvbox_idle      (dc_context_t* context);
-
-
-/**
- * Execute pending sentbox-jobs.
- * This function and dc_perform_sentbox_fetch() and dc_perform_sentbox_idle()
- * must be called from the same thread, typically in a loop.
- *
- * Example:
- *
- *     void* sentbox_thread_func(void* context)
- *     {
- *         while (true) {
- *             dc_perform_sentbox_jobs(context);
- *             dc_perform_sentbox_fetch(context);
- *             dc_perform_sentbox_idle(context);
- *         }
- *     }
- *
- *     // start sentbox-thread that runs forever
- *     pthread_t sentbox_thread;
- *     pthread_create(&sentbox_thread, NULL, sentbox_thread_func, context);
- *
- *     ... program runs ...
- *
- *     // network becomes available again -
- *     // the interrupt causes dc_perform_sentbox_idle() in the thread above
- *     // to return so that jobs are executed and messages are fetched.
- *     dc_maybe_network(context);
- *
- * @memberof dc_context_t
- * @param context The context as created by dc_context_new().
- * @return None.
- */
-void            dc_perform_sentbox_jobs         (dc_context_t* context);
-
-
-/**
- * Fetch new messages from the Sent folder, if any.
- * This function and dc_perform_sentbox_idle()
- * must be called from the same thread, typically in a loop.
- *
- * @memberof dc_context_t
- * @param context The context as created by dc_context_new().
- * @return None.
- */
-void            dc_perform_sentbox_fetch     (dc_context_t* context);
-
-
-/**
- * Wait for messages or jobs in the SENTBOX-thread.
- * This function and dc_perform_sentbox_fetch()
- * must be called from the same thread, typically in a loop.
- *
- * @memberof dc_context_t
- * @param context The context as created by dc_context_new().
- * @return None.
- */
-void            dc_perform_sentbox_idle      (dc_context_t* context);
-
-
-/**
- * Interrupt waiting for messages or jobs in the SENTBOX-thread.
- *
- * @memberof dc_context_t
- * @param context The context as created by dc_context_new().
- * @return None.
- */
-void            dc_interrupt_sentbox_idle    (dc_context_t* context);
-
-
-/**
- * Execute pending smtp-jobs.
- * This function and dc_perform_smtp_idle() must be called from the same thread,
- * typically in a loop.
- *
- * Example:
- *
- *     void* smtp_thread_func(void* context)
- *     {
- *         while (true) {
- *             dc_perform_smtp_jobs(context);
- *             dc_perform_smtp_idle(context);
- *         }
- *     }
- *
- *     // start smtp-thread that runs forever
- *     pthread_t smtp_thread;
- *     pthread_create(&smtp_thread, NULL, smtp_thread_func, context);
- *
- *     ... program runs ...
- *
- *     // network becomes available again -
- *     // the interrupt causes dc_perform_smtp_idle() in the thread above
- *     // to return so that jobs are executed
- *     dc_maybe_network(context);
- *
- * @memberof dc_context_t
- * @param context The context as created by dc_context_new().
- * @return None.
- */
-void            dc_perform_smtp_jobs         (dc_context_t* context);
-
-
-/**
- * Wait for smtp-jobs.
- * This function and dc_perform_smtp_jobs() must be called from the same thread,
- * typically in a loop.
- *
- * See dc_interrupt_smtp_idle() for an example.
- *
- * @memberof dc_context_t
- * @param context The context as created by dc_context_new().
- * @return None.
- */
-void            dc_perform_smtp_idle         (dc_context_t* context);
-
-
-/**
- * Interrupt waiting for smtp-jobs.
- * If dc_perform_smtp_jobs() and dc_perform_smtp_idle() are called in a loop,
- * calling this function causes jobs to be executed.
- *
- * dc_interrupt_smtp_idle() does _not_ interrupt dc_perform_smtp_jobs().
- * If the smtp-thread is inside this function when dc_interrupt_smtp_idle() is called, however,
- * the next call of the smtp-thread to dc_perform_smtp_idle() is interrupted immediately.
- *
- * Internally, this function is called whenever a message is to be sent.
- *
- * When you need to call this function just because to get jobs done after network changes,
- * use dc_maybe_network() instead.
- *
- * @memberof dc_context_t
- * @param context The context as created by dc_context_new().
- * @return None.
- */
-void            dc_interrupt_smtp_idle       (dc_context_t* context);
-
-
-/**
- * This function can be called whenever there is a hint
- * that the network is available again.
- * The library will try to send pending messages out.
- *
- * @memberof dc_context_t
- * @param context The context as created by dc_context_new().
- * @return None.
  */
 void            dc_maybe_network             (dc_context_t* context);
+
+
+
+/**
+ * Save a keypair as the default keys for the user.
+ *
+ * This API is only for testing purposes and should not be used as part of a
+ * normal application, use the import-export APIs instead.
+ *
+ * This saves a public/private keypair as the default keypair in the context.
+ * It allows avoiding having to generate a secret key for unittests which need
+ * one.
+ *
+ * @memberof dc_context_t
+ * @param context The context as created by dc_context_new().
+ * @param addr The email address of the user.  This must match the
+ *    configured_addr setting of the context as well as the UID of the key.
+ * @param public_data The public key as base64.
+ * @param secret_data The secret key as base64.
+ * @return 1 on success, 0 on failure.
+ */
+int             dc_preconfigure_keypair        (dc_context_t* context, const char *addr, const char *public_data, const char *secret_data);
 
 
 // handle chatlists
@@ -857,6 +609,7 @@ void            dc_maybe_network             (dc_context_t* context);
 #define         DC_GCL_ARCHIVED_ONLY         0x01
 #define         DC_GCL_NO_SPECIALS           0x02
 #define         DC_GCL_ADD_ALLDONE_HINT      0x04
+#define         DC_GCL_FOR_FORWARDING        0x08
 
 
 /**
@@ -868,7 +621,7 @@ void            dc_maybe_network             (dc_context_t* context);
  * Clients should not try to re-sort the list as this would be an expensive action
  * and would result in inconsistencies between clients.
  *
- * To get information about each entry, use eg. dc_chatlist_get_summary().
+ * To get information about each entry, use e.g. dc_chatlist_get_summary().
  *
  * By default, the function adds some special entries to the list.
  * These special entries can be identified by the ID returned by dc_chatlist_get_chat_id():
@@ -880,7 +633,7 @@ void            dc_maybe_network             (dc_context_t* context);
  *   or "Not now".
  *   The UI can also offer a "Close" button that calls dc_marknoticed_contact() then.
  * - DC_CHAT_ID_ARCHIVED_LINK (6) - this special chat is present if the user has
- *   archived _any_ chat using dc_archive_chat(). The UI should show a link as
+ *   archived _any_ chat using dc_set_chat_visibility(). The UI should show a link as
  *   "Show archived chats", if the user clicks this item, the UI should show a
  *   list of all archived chats that can be created by this function hen using
  *   the DC_GCL_ARCHIVED_ONLY flag.
@@ -895,8 +648,12 @@ void            dc_maybe_network             (dc_context_t* context);
  *       if DC_GCL_ARCHIVED_ONLY is not set, only unarchived chats are returned and
  *       the pseudo-chat DC_CHAT_ID_ARCHIVED_LINK is added if there are _any_ archived
  *       chats
+ *     - the flag DC_GCL_FOR_FORWARDING sorts "Saved messages" to the top of the chatlist
+ *       and hides the "Device chat" and the deaddrop.
+ *       typically used on forwarding, may be combined with DC_GCL_NO_SPECIALS
+ *       to also hide the archive link.
  *     - if the flag DC_GCL_NO_SPECIALS is set, deaddrop and archive link are not added
- *       to the list (may be used eg. for selecting chats on forwarding, the flag is
+ *       to the list (may be used e.g. for selecting chats on forwarding, the flag is
  *       not needed when DC_GCL_ARCHIVED_ONLY is already set)
  *     - if the flag DC_GCL_ADD_ALLDONE_HINT is set, DC_CHAT_ID_ALLDONE_HINT
  *       is added as needed.
@@ -948,7 +705,7 @@ uint32_t        dc_create_chat_by_msg_id     (dc_context_t* context, uint32_t ms
  * see dc_create_group_chat().
  *
  * If a chat already exists, this ID is returned, otherwise a new chat is created;
- * this new chat may already contain messages, eg. from the deaddrop, to get the
+ * this new chat may already contain messages, e.g. from the deaddrop, to get the
  * chat messages, use dc_get_chat_msgs().
  *
  * @memberof dc_context_t
@@ -1027,7 +784,7 @@ uint32_t        dc_prepare_msg               (dc_context_t* context, uint32_t ch
  *
  * Sends the event #DC_EVENT_MSGS_CHANGED on succcess.
  * However, this does not imply, the message really reached the recipient -
- * sending may be delayed eg. due to network problems. However, from your
+ * sending may be delayed e.g. due to network problems. However, from your
  * view, you're done with the message. Sooner or later it will find its way.
  *
  * Example:
@@ -1039,6 +796,15 @@ uint32_t        dc_prepare_msg               (dc_context_t* context, uint32_t ch
  *
  * dc_msg_unref(msg);
  * ~~~
+ *
+ * If you send images with the #DC_MSG_IMAGE type,
+ * they will be recoded to a reasonable size before sending, if possible
+ * (cmp the dc_set_config()-option `media_quality`).
+ * If that fails, is not possible, or the image is already small enough, the image is sent as original.
+ * If you want images to be always sent as the original file, use the #DC_MSG_FILE type.
+ *
+ * Videos and other file types are currently not recoded by the library,
+ * with dc_prepare_msg(), however, you can do that from the UI.
  *
  * @memberof dc_context_t
  * @param context The context object as returned from dc_context_new().
@@ -1052,13 +818,30 @@ uint32_t        dc_prepare_msg               (dc_context_t* context, uint32_t ch
  */
 uint32_t        dc_send_msg                  (dc_context_t* context, uint32_t chat_id, dc_msg_t* msg);
 
+/**
+ * Send a message defined by a dc_msg_t object to a chat, synchronously.
+ * This bypasses the IO scheduler and creates its own SMTP connection. Which means
+ * this is useful when the scheduler is not running.
+ *
+ * @memberof dc_context_t
+ * @param context The context object as returned from dc_context_new().
+ * @param chat_id Chat ID to send the message to.
+ *     If dc_prepare_msg() was called before, this parameter can be 0.
+ * @param msg Message object to send to the chat defined by the chat ID.
+ *     On succcess, msg_id of the object is set up,
+ *     The function does not take ownership of the object,
+ *     so you have to free it using dc_msg_unref() as usual.
+ * @return The ID of the message that is about to be sent. 0 in case of errors.
+ */
+uint32_t        dc_send_msg_sync                  (dc_context_t* context, uint32_t chat_id, dc_msg_t* msg);
+
 
 /**
  * Send a simple text message a given chat.
  *
  * Sends the event #DC_EVENT_MSGS_CHANGED on succcess.
  * However, this does not imply, the message really reached the recipient -
- * sending may be delayed eg. due to network problems. However, from your
+ * sending may be delayed e.g. due to network problems. However, from your
  * view, you're done with the message. Sooner or later it will find its way.
  *
  * See also dc_send_msg().
@@ -1076,6 +859,42 @@ uint32_t        dc_send_text_msg             (dc_context_t* context, uint32_t ch
 
 
 /**
+ * Send invitation to a videochat.
+ *
+ * This function reads the `webrtc_instance` config value,
+ * may check that the server is working in some way
+ * and creates a unique room for this chat, if needed doing a TOKEN roundtrip for that.
+ *
+ * After that, the function sends out a message that contains information to join the room:
+ *
+ * - To allow non-delta-clients to join the chat,
+ *   the message contains a text-area with some descriptive text
+ *   and a url that can be opened in a supported browser to join the videochat
+ *
+ * - delta-clients can get all information needed from
+ *   the message object, using e.g.
+ *   dc_msg_get_videochat_url() and check dc_msg_get_viewtype() for #DC_MSG_VIDEOCHAT_INVITATION
+ *
+ * dc_send_videochat_invitation() is blocking and may take a while,
+ * so the UIs will typically call the function from within a thread.
+ * Moreover, UIs will typically enter the room directly without an additional click on the message,
+ * for this purpose, the function returns the message-id directly.
+ *
+ * As for other messages sent, this function
+ * sends the event #DC_EVENT_MSGS_CHANGED on success, the message has a delivery state, and so on.
+ * The recipient will get noticed by the call as usual by #DC_EVENT_INCOMING_MSG or #DC_EVENT_MSGS_CHANGED,
+ * However, UIs might some things differently, e.g. play a different sound.
+ *
+ * @memberof dc_context_t
+ * @param context The context object
+ * @param chat_id The chat to start a videochat for.
+ * @return The id if the message sent out
+ *     or 0 for errors.
+ */
+uint32_t dc_send_videochat_invitation (dc_context_t* context, uint32_t chat_id);
+
+
+/**
  * Save a draft for a chat in the database.
  *
  * The UI should call this function if the user has prepared a message
@@ -1085,21 +904,20 @@ uint32_t        dc_send_text_msg             (dc_context_t* context, uint32_t ch
  * allowing the user to continue editing and sending.
  *
  * Drafts are considered when sorting messages
- * and are also returned eg. by dc_chatlist_get_summary().
+ * and are also returned e.g. by dc_chatlist_get_summary().
  *
  * Each chat can have its own draft but only one draft per chat is possible.
  *
  * If the draft is modified, an #DC_EVENT_MSGS_CHANGED will be sent.
  *
  * @memberof dc_context_t
- * @param context The context as created by dc_context_new().
+ * @param context The context object.
  * @param chat_id The chat ID to save the draft for.
  * @param msg The message to save as a draft.
  *     Existing draft will be overwritten.
  *     NULL deletes the existing draft, if any, without sending it.
  *     Currently, also non-text-messages
  *     will delete the existing drafts.
- * @return None.
  */
 void            dc_set_draft                 (dc_context_t* context, uint32_t chat_id, dc_msg_t* msg);
 
@@ -1117,7 +935,7 @@ void            dc_set_draft                 (dc_context_t* context, uint32_t ch
  * To check, if a given chat is a device-chat, see dc_chat_is_device_talk()
  *
  * @memberof dc_context_t
- * @param context The context as created by dc_context_new().
+ * @param context The context object.
  * @param label A unique name for the message to add.
  *     The label is typically not displayed to the user and
  *     must be created from the characters `A-Z`, `a-z`, `0-9`, `_` or `-`.
@@ -1153,31 +971,12 @@ void            dc_set_draft                 (dc_context_t* context, uint32_t ch
  */
 uint32_t        dc_add_device_msg            (dc_context_t* context, const char* label, dc_msg_t* msg);
 
-
-/**
- * Init device-messages and saved-messages chat.
- * This function adds the device-chat and saved-messages chat
- * and adds one or more welcome or update-messages.
- * The ui can add messages on its own using dc_add_device_msg() -
- * for ordering, either before or after or even without calling this function.
- *
- * Chat and message creation is done only once.
- * So if the user has manually deleted things, they won't be re-created
- * (however, not seen device messages are added and may re-create the device-chat).
- *
- * @memberof dc_context_t
- * @param context The context as created by dc_context_new().
- * @return None.
- */
-void            dc_update_device_chats       (dc_context_t* context);
-
-
 /**
  * Check if a device-message with a given label was ever added.
  * Device-messages can be added dc_add_device_msg().
  *
  * @memberof dc_context_t
- * @param context The context as created by dc_context_new().
+ * @param context The context object.
  * @param label Label of the message to check.
  * @return 1=A message with this label was added at some point,
  *     0=A message with this label was never added.
@@ -1190,7 +989,7 @@ int             dc_was_device_msg_ever_added (dc_context_t* context, const char*
  * See dc_set_draft() for more details about drafts.
  *
  * @memberof dc_context_t
- * @param context The context as created by dc_context_new().
+ * @param context The context object.
  * @param chat_id The chat ID to get the draft for.
  * @return Message object.
  *     Can be passed directly to dc_send_msg().
@@ -1201,6 +1000,7 @@ dc_msg_t*       dc_get_draft                 (dc_context_t* context, uint32_t ch
 
 
 #define         DC_GCM_ADDDAYMARKER          0x01
+#define         DC_GCM_INFO_ONLY             0x02
 
 
 /**
@@ -1218,6 +1018,8 @@ dc_msg_t*       dc_get_draft                 (dc_context_t* context, uint32_t ch
  * @param chat_id The chat ID of which the messages IDs should be queried.
  * @param flags If set to DC_GCM_ADDDAYMARKER, the marker DC_MSG_ID_DAYMARKER will
  *     be added before each day (regarding the local timezone).  Set this to 0 if you do not want this behaviour.
+ *     To get the concrete time of the marker, use dc_array_get_timestamp().
+ *     If set to DC_GCM_INFO_ONLY, only system messages will be returned, can be combined with DC_GCM_ADDDAYMARKER.
  * @param marker1before An optional message ID.  If set, the id DC_MSG_ID_MARKER1 will be added just
  *   before the given ID in the returned array.  Set this to 0 if you do not want this behaviour.
  * @return Array of message IDs, must be dc_array_unref()'d when no longer used.
@@ -1248,6 +1050,23 @@ int             dc_get_msg_cnt               (dc_context_t* context, uint32_t ch
 int             dc_get_fresh_msg_cnt         (dc_context_t* context, uint32_t chat_id);
 
 
+
+/**
+ * Estimate the number of messages that will be deleted
+ * by the dc_set_config()-options `delete_device_after` or `delete_server_after`.
+ * This is typically used to show the estimated impact to the user
+ * before actually enabling deletion of old messages.
+ *
+ * @memberof dc_context_t
+ * @param context The context object as returned from dc_context_new().
+ * @param from_server 1=Estimate deletion count for server, 0=Estimate deletion count for device
+ * @param seconds Count messages older than the given number of seconds.
+ * @return Number of messages that are older than the given number of seconds.
+ *     This includes emails downloaded due to the `show_emails` option.
+ *     Messages in the "saved messages" folder are not counted as they will not be deleted automatically.
+ */
+int             dc_estimate_deletion_cnt    (dc_context_t* context, int from_server, int64_t seconds);
+
 /**
  * Returns the message IDs of all _fresh_ messages of any chat.
  * Typically used for implementing notification summaries.
@@ -1267,25 +1086,14 @@ dc_array_t*     dc_get_fresh_msgs            (dc_context_t* context);
  * but are still waiting for being marked as "seen" using dc_markseen_msgs()
  * (IMAP/MDNs is not done for noticed messages).
  *
- * Calling this function usually results in the event #DC_EVENT_MSGS_CHANGED.
- * See also dc_marknoticed_all_chats(), dc_marknoticed_contact() and dc_markseen_msgs().
+ * Calling this function usually results in the event #DC_EVENT_MSGS_NOTICED.
+ * See also dc_marknoticed_contact() and dc_markseen_msgs().
  *
  * @memberof dc_context_t
  * @param context The context object as returned from dc_context_new().
  * @param chat_id The chat ID of which all messages should be marked as being noticed.
- * @return None.
  */
 void            dc_marknoticed_chat          (dc_context_t* context, uint32_t chat_id);
-
-
-/**
- * Same as dc_marknoticed_chat() but for _all_ chats.
- *
- * @memberof dc_context_t
- * @param context The context object as returned from dc_context_new().
- * @return None.
- */
-void            dc_marknoticed_all_chats     (dc_context_t* context);
 
 
 /**
@@ -1334,25 +1142,35 @@ uint32_t        dc_get_next_media            (dc_context_t* context, uint32_t ms
 
 
 /**
- * Archive or unarchive a chat.
+ * Enable or disable protection against active attacks.
+ * To enable protection, it is needed that all members are verified;
+ * if this condition is met, end-to-end-encryption is always enabled
+ * and only the verified keys are used.
  *
- * Archived chats are not included in the default chatlist returned
- * by dc_get_chatlist().  Instead, if there are _any_ archived chats,
- * the pseudo-chat with the chat_id DC_CHAT_ID_ARCHIVED_LINK will be added the the
- * end of the chatlist.
- *
- * - To get a list of archived chats, use dc_get_chatlist() with the flag DC_GCL_ARCHIVED_ONLY.
- * - To find out the archived state of a given chat, use dc_chat_get_archived()
- * - Messages in archived chats are marked as being noticed, so they do not count as "fresh"
- * - Calling this function usually results in the event #DC_EVENT_MSGS_CHANGED
+ * Sends out #DC_EVENT_CHAT_MODIFIED on changes
+ * and #DC_EVENT_MSGS_CHANGED if a status message was sent.
  *
  * @memberof dc_context_t
  * @param context The context object as returned from dc_context_new().
- * @param chat_id The ID of the chat to archive or unarchive.
- * @param archive 1=archive chat, 0=unarchive chat, all other values are reserved for future use
- * @return None.
+ * @param chat_id The ID of the chat to change the protection for.
+ * @param protect 1=protect chat, 0=unprotect chat
+ * @return 1=success, 0=error, e.g. some members may be unverified
  */
-void            dc_archive_chat              (dc_context_t* context, uint32_t chat_id, int archive);
+int             dc_set_chat_protection       (dc_context_t* context, uint32_t chat_id, int protect);
+
+
+/**
+ * Set chat visibility to pinned, archived or normal.
+ *
+ * Calling this function usually results in the event #DC_EVENT_MSGS_CHANGED
+ * See @ref DC_CHAT_VISIBILITY for detailed information about the visibilities.
+ *
+ * @memberof dc_context_t
+ * @param context The context object as returned from dc_context_new().
+ * @param chat_id The ID of the chat to change the visibility for.
+ * @param visibility one of @ref DC_CHAT_VISIBILITY
+ */
+void            dc_set_chat_visibility       (dc_context_t* context, uint32_t chat_id, int visibility);
 
 
 /**
@@ -1379,7 +1197,6 @@ void            dc_archive_chat              (dc_context_t* context, uint32_t ch
  * @memberof dc_context_t
  * @param context The context object as returned from dc_context_new().
  * @param chat_id The ID of the chat to delete.
- * @return None.
  */
 void            dc_delete_chat               (dc_context_t* context, uint32_t chat_id);
 
@@ -1403,6 +1220,18 @@ void            dc_delete_chat               (dc_context_t* context, uint32_t ch
  */
 dc_array_t*     dc_get_chat_contacts         (dc_context_t* context, uint32_t chat_id);
 
+/**
+ * Get the chat's ephemeral message timer.
+ * The ephemeral message timer is set by dc_set_chat_ephemeral_timer()
+ * on this or any other device participating in the chat.
+ *
+ * @memberof dc_context_t
+ * @param context The context object.
+ * @param chat_id The chat ID.
+ *
+ * @return ephemeral timer value in seconds, 0 if the timer is disabled or if there is an error
+ */
+uint32_t dc_get_chat_ephemeral_timer (dc_context_t* context, uint32_t chat_id);
 
 /**
  * Search messages containing the given query string.
@@ -1458,23 +1287,23 @@ dc_chat_t*      dc_get_chat                  (dc_context_t* context, uint32_t ch
  * This may be useful if you want to show some help for just created groups.
  *
  * @memberof dc_context_t
- * @param context The context as created by dc_context_new().
- * @param verified If set to 1 the function creates a secure verified group.
- *     Only secure-verified members are allowed in these groups
+ * @param context The context object.
+ * @param protect If set to 1 the function creates group with protection initially enabled.
+ *     Only verified members are allowed in these groups
  *     and end-to-end-encryption is always enabled.
  * @param name The name of the group chat to create.
  *     The name may be changed later using dc_set_chat_name().
  *     To find out the name of a group later, see dc_chat_get_name()
  * @return The chat ID of the new group chat, 0 on errors.
  */
-uint32_t        dc_create_group_chat         (dc_context_t* context, int verified, const char* name);
+uint32_t        dc_create_group_chat         (dc_context_t* context, int protect, const char* name);
 
 
 /**
  * Check if a given contact ID is a member of a group chat.
  *
  * @memberof dc_context_t
- * @param context The context as created by dc_context_new().
+ * @param context The context object.
  * @param chat_id The chat ID to check.
  * @param contact_id The contact ID to check.  To check if yourself is member
  *     of the chat, pass DC_CONTACT_ID_SELF (1) here.
@@ -1489,12 +1318,12 @@ int             dc_is_contact_in_chat        (dc_context_t* context, uint32_t ch
  * If the group is already _promoted_ (any message was sent to the group),
  * all group members are informed by a special status message that is sent automatically by this function.
  *
- * If the group is a verified group, only verified contacts can be added to the group.
+ * If the group has group protection enabled, only verified contacts can be added to the group.
  *
  * Sends out #DC_EVENT_CHAT_MODIFIED and #DC_EVENT_MSGS_CHANGED if a status message was sent.
  *
  * @memberof dc_context_t
- * @param context The context as created by dc_context_new().
+ * @param context The context object.
  * @param chat_id The chat ID to add the contact to.  Must be a group chat.
  * @param contact_id The contact ID to add to the chat.
  * @return 1=member added to group, 0=error
@@ -1511,7 +1340,7 @@ int             dc_add_contact_to_chat       (dc_context_t* context, uint32_t ch
  * Sends out #DC_EVENT_CHAT_MODIFIED and #DC_EVENT_MSGS_CHANGED if a status message was sent.
  *
  * @memberof dc_context_t
- * @param context The context as created by dc_context_new().
+ * @param context The context object.
  * @param chat_id The chat ID to remove the contact from.  Must be a group chat.
  * @param contact_id The contact ID to remove from the chat.
  * @return 1=member removed from group, 0=error
@@ -1530,11 +1359,29 @@ int             dc_remove_contact_from_chat  (dc_context_t* context, uint32_t ch
  * @memberof dc_context_t
  * @param chat_id The chat ID to set the name for.  Must be a group chat.
  * @param name New name of the group.
- * @param context The context as created by dc_context_new().
+ * @param context The context object.
  * @return 1=success, 0=error
  */
 int             dc_set_chat_name             (dc_context_t* context, uint32_t chat_id, const char* name);
 
+/**
+ * Set the chat's ephemeral message timer.
+ *
+ * This timer is applied to all messages in a chat and starts when the message is read.
+ * For outgoing messages, the timer starts once the message is sent,
+ * for incoming messages, the timer starts once dc_markseen_msgs() is called.
+ *
+ * The setting is synchronized to all clients
+ * participating in a chat.
+ *
+ * @memberof dc_context_t
+ * @param context The context object.
+ * @param chat_id The chat ID to set the ephemeral message timer for.
+ * @param timer The timer value in seconds or 0 to disable the timer.
+ *
+ * @return 1=success, 0=error
+ */
+int dc_set_chat_ephemeral_timer (dc_context_t* context, uint32_t chat_id, uint32_t timer);
 
 /**
  * Set group profile image.
@@ -1547,30 +1394,96 @@ int             dc_set_chat_name             (dc_context_t* context, uint32_t ch
  * To find out the profile image of a chat, use dc_chat_get_profile_image()
  *
  * @memberof dc_context_t
- * @param context The context as created by dc_context_new().
+ * @param context The context object.
  * @param chat_id The chat ID to set the image for.
- * @param image Full path of the image to use as the group image.  If you pass NULL here,
- *     the group image is deleted (for promoted groups, all members are informed about this change anyway).
+ * @param image Full path of the image to use as the group image. The image will immediately be copied to the 
+ *     `blobdir`; the original image will not be needed anymore.
+ *      If you pass NULL here, the group image is deleted (for promoted groups, all members are informed about 
+ *      this change anyway).
  * @return 1=success, 0=error
  */
 int             dc_set_chat_profile_image    (dc_context_t* context, uint32_t chat_id, const char* image);
 
 
+
+/**
+ * Set mute duration of a chat.
+ *
+ * The UI can then call dc_chat_is_muted() when receiving a new message to decide whether it should trigger an notification.
+ *
+ * Sends out #DC_EVENT_CHAT_MODIFIED.
+ *
+ * @memberof dc_context_t
+ * @param chat_id The chat ID to set the mute duration.
+ * @param duration The duration (0 for no mute, -1 for forever mute, everything else is is the relative mute duration from now in seconds)
+ * @param context The context object.
+ * @return 1=success, 0=error
+ */
+int             dc_set_chat_mute_duration             (dc_context_t* context, uint32_t chat_id, int64_t duration);
+
 // handle messages
 
 /**
  * Get an informational text for a single message. The text is multiline and may
- * contain eg. the raw text of the message.
+ * contain e.g. the raw text of the message.
  *
  * The max. text returned is typically longer (about 100000 characters) than the
  * max. text returned by dc_msg_get_text() (about 30000 characters).
  *
  * @memberof dc_context_t
- * @param context The context object as created by dc_context_new().
+ * @param context The context object object.
  * @param msg_id The message id for which information should be generated
  * @return Text string, must be released using dc_str_unref() after usage
  */
 char*           dc_get_msg_info              (dc_context_t* context, uint32_t msg_id);
+
+
+/**
+ * Get uncut message, if available.
+ *
+ * Delta Chat tries to break the message in simple parts as plain text or images
+ * that are retrieved using dc_msg_get_viewtype(), dc_msg_get_text(), dc_msg_get_file() and so on.
+ * This works totally fine for Delta Chat to Delta Chat communication,
+ * however, when the counterpart uses another E-Mail-client, this has limits:
+ *
+ * - even if we do some good job on removing quotes,
+ *   sometimes one needs to see them
+ * - HTML-only messages might lose information on conversion to text,
+ *   esp. when there are lots of embedded images
+ * - even if there is some plain text part for a HTML-message,
+ *   this is often poor and not nicely usable due to long links
+ *
+ * In these cases, dc_msg_has_html() returns 1
+ * and you can ask dc_get_msg_html() for some HTML-code
+ * that shows the uncut text (which is close to the original)
+ * For simplicity, the function _always_ returns HTML-code,
+ * this removes the need for the UI
+ * to deal with different formatting options of PLAIN-parts.
+ *
+ * **Note:** The returned HTML-code may contain scripts,
+ * external images that may be misused as hidden read-receipts and so on.
+ * Taking care of these parts
+ * while maintaining compatibility with the then generated HTML-code
+ * is not easily doable, if at all.
+ * E.g. taking care of tags and attributes is not sufficient,
+ * we would have to deal with linked content (e.g. script, css),
+ * text (e.g. script-blocks) and values (e.g. javascript-protocol) as well;
+ * on this level, we have to deal with encodings, browser peculiarities and so on -
+ * and would still risk to oversee something and to break things.
+ *
+ * To avoid starting this cat-and-mouse game,
+ * and to close this issue in a sustainable way,
+ * it is up to the UI to display the HTML-code in an **appropriate sandbox environment** -
+ * that may e.g. be an external browser or a WebView with scripting disabled.
+ *
+ * @memberof dc_context_t
+ * @param context The context object object.
+ * @param msg_id The message id for which the uncut text should be loaded
+ * @return Uncut text as HTML.
+ *     In case of errors, NULL is returned.
+ *     The result must be released using dc_str_unref().
+ */
+char*           dc_get_msg_html              (dc_context_t* context, uint32_t msg_id);
 
 
 /**
@@ -1580,11 +1493,11 @@ char*           dc_get_msg_info              (dc_context_t* context, uint32_t ms
  * was called before.
  *
  * @memberof dc_context_t
- * @param context The context object as created by dc_context_new().
+ * @param context The context object.
  * @param msg_id The message id, must be the id of an incoming message.
  * @return Raw headers as a multi-line string, must be released using dc_str_unref() after usage.
  *     Returns NULL if there are no headers saved for the given message,
- *     eg. because of save_mime_headers is not set
+ *     e.g. because of save_mime_headers is not set
  *     or the message is not incoming.
  */
 char*           dc_get_mime_headers          (dc_context_t* context, uint32_t msg_id);
@@ -1595,80 +1508,58 @@ char*           dc_get_mime_headers          (dc_context_t* context, uint32_t ms
  * on the IMAP server.
  *
  * @memberof dc_context_t
- * @param context The context object as created by dc_context_new()
+ * @param context The context object
  * @param msg_ids an array of uint32_t containing all message IDs that should be deleted
  * @param msg_cnt The number of messages IDs in the msg_ids array
- * @return None.
  */
 void            dc_delete_msgs               (dc_context_t* context, const uint32_t* msg_ids, int msg_cnt);
-
-/**
- * Empty IMAP server folder: delete all messages.
- *
- * @memberof dc_context_t
- * @param context The context object as created by dc_context_new()
- * @param flags What to delete, a combination of the @ref DC_EMPTY flags
- * @return None.
- */
-void            dc_empty_server              (dc_context_t* context, uint32_t flags);
 
 
 /**
  * Forward messages to another chat.
  *
  * @memberof dc_context_t
- * @param context The context object as created by dc_context_new()
+ * @param context The context object.
  * @param msg_ids An array of uint32_t containing all message IDs that should be forwarded
  * @param msg_cnt The number of messages IDs in the msg_ids array
  * @param chat_id The destination chat ID.
- * @return None.
  */
 void            dc_forward_msgs              (dc_context_t* context, const uint32_t* msg_ids, int msg_cnt, uint32_t chat_id);
 
 
 /**
- * Mark all messages sent by the given contact
- * as _noticed_.  See also dc_marknoticed_chat() and
- * dc_markseen_msgs()
+ * Mark all messages sent by the given contact as _noticed_.
+ * This function is typically used to ignore a user in the deaddrop temporarily ("Not now" button).
  *
- * Calling this function usually results in the event #DC_EVENT_MSGS_CHANGED.
+ * The contact is expected to belong to the deaddrop;
+ * only one #DC_EVENT_MSGS_NOTICED with chat_id=DC_CHAT_ID_DEADDROP may be emitted.
+ *
+ * See also dc_marknoticed_chat() and dc_markseen_msgs()
  *
  * @memberof dc_context_t
- * @param context The context object as created by dc_context_new()
+ * @param context The context object.
  * @param contact_id The contact ID of which all messages should be marked as noticed.
- * @return None.
  */
 void            dc_marknoticed_contact       (dc_context_t* context, uint32_t contact_id);
 
 
 /**
  * Mark a message as _seen_, updates the IMAP state and
- * sends MDNs. If the message is not in a real chat (eg. a contact request), the
+ * sends MDNs. If the message is not in a real chat (e.g. a contact request), the
  * message is only marked as NOTICED and no IMAP/MDNs is done.  See also
  * dc_marknoticed_chat() and dc_marknoticed_contact()
+ *
+ * Moreover, if messages belong to a chat with ephemeral messages enabled,
+ * the ephemeral timer is started for these messages.
+ *
+ * One #DC_EVENT_MSGS_NOTICED event is emitted per modified chat.
  *
  * @memberof dc_context_t
  * @param context The context object.
  * @param msg_ids An array of uint32_t containing all the messages IDs that should be marked as seen.
  * @param msg_cnt The number of message IDs in msg_ids.
- * @return None.
  */
 void            dc_markseen_msgs             (dc_context_t* context, const uint32_t* msg_ids, int msg_cnt);
-
-
-/**
- * Star/unstar messages by setting the last parameter to 0 (unstar) or 1 (star).
- * Starred messages are collected in a virtual chat that can be shown using
- * dc_get_chat_msgs() using the chat_id DC_CHAT_ID_STARRED.
- *
- * @memberof dc_context_t
- * @param context The context object as created by dc_context_new()
- * @param msg_ids An array of uint32_t message IDs defining the messages to star or unstar
- * @param msg_cnt The number of IDs in msg_ids
- * @param star 0=unstar the messages in msg_ids, 1=star them
- * @return None.
- */
-void            dc_star_msgs                 (dc_context_t* context, const uint32_t* msg_ids, int msg_cnt, int star);
 
 
 /**
@@ -1677,7 +1568,7 @@ void            dc_star_msgs                 (dc_context_t* context, const uint3
  * For a list or chats, see dc_get_chatlist()
  *
  * @memberof dc_context_t
- * @param context The context as created by dc_context_new().
+ * @param context The context object.
  * @param msg_id The message ID for which the message object should be created.
  * @return A dc_msg_t message object.
  *     On errors, NULL is returned.
@@ -1706,15 +1597,16 @@ int             dc_may_be_valid_addr         (const char* addr);
 
 /**
  * Check if an e-mail address belongs to a known and unblocked contact.
- * Known and unblocked contacts will be returned by dc_get_contacts().
+ * To get a list of all known and unblocked contacts, use dc_get_contacts().
  *
  * To validate an e-mail address independently of the contact database
  * use dc_may_be_valid_addr().
  *
  * @memberof dc_context_t
- * @param context The context object as created by dc_context_new().
+ * @param context The context object.
  * @param addr The e-mail-address to check.
- * @return 1=address is a contact in use, 0=address is not a contact in use.
+ * @return Contact ID of the contact belonging to the e-mail-address
+ *     or 0 if there is no contact that is or was introduced by an accepted contact.  
  */
 uint32_t        dc_lookup_contact_id_by_addr (dc_context_t* context, const char* addr);
 
@@ -1731,7 +1623,7 @@ uint32_t        dc_lookup_contact_id_by_addr (dc_context_t* context, const char*
  * May result in a #DC_EVENT_CONTACTS_CHANGED event.
  *
  * @memberof dc_context_t
- * @param context The context object as created by dc_context_new().
+ * @param context The context object.
  * @param name Name of the contact to add. If you do not know the name belonging
  *     to the address, you can give NULL here.
  * @param addr E-mail-address of the contact to add. If the email address
@@ -1756,13 +1648,13 @@ uint32_t        dc_create_contact            (dc_context_t* context, const char*
  * Trying to add email-addresses that are already in the contact list,
  * results in updating the name unless the name was changed manually by the user.
  * If any email-address or any name is really updated,
- * the event DC_EVENT_CONTACTS_CHANGED is sent.
+ * the event #DC_EVENT_CONTACTS_CHANGED is sent.
  *
  * To add a single contact entered by the user, you should prefer dc_create_contact(),
  * however, for adding a bunch of addresses, this function is _much_ faster.
  *
  * @memberof dc_context_t
- * @param context the context object as created by dc_context_new().
+ * @param context the context object.
  * @param addr_book A multi-line string in the format
  *     `Name one\nAddress one\nName two\nAddress two`.
  *      If an email address already exists, the name is updated
@@ -1778,7 +1670,7 @@ int             dc_add_address_book          (dc_context_t* context, const char*
  * To get information about a single contact, see dc_get_contact().
  *
  * @memberof dc_context_t
- * @param context The context object as created by dc_context_new().
+ * @param context The context object.
  * @param flags A combination of flags:
  *     - if the flag DC_GCL_ADD_SELF is set, SELF is added to the list unless filtered by other parameters
  *     - if the flag DC_GCL_VERIFIED_ONLY is set, only verified contacts are returned.
@@ -1795,7 +1687,7 @@ dc_array_t*     dc_get_contacts              (dc_context_t* context, uint32_t fl
  * Get the number of blocked contacts.
  *
  * @memberof dc_context_t
- * @param context The context object as created by dc_context_new().
+ * @param context The context object.
  * @return The number of blocked contacts.
  */
 int             dc_get_blocked_cnt           (dc_context_t* context);
@@ -1805,7 +1697,7 @@ int             dc_get_blocked_cnt           (dc_context_t* context);
  * Get blocked contacts.
  *
  * @memberof dc_context_t
- * @param context The context object as created by dc_context_new().
+ * @param context The context object.
  * @return An array containing all blocked contact IDs.  Must be dc_array_unref()'d
  *     after usage.
  */
@@ -1817,10 +1709,9 @@ dc_array_t*     dc_get_blocked_contacts      (dc_context_t* context);
  * May result in a #DC_EVENT_CONTACTS_CHANGED event.
  *
  * @memberof dc_context_t
- * @param context The context object as created by dc_context_new().
+ * @param context The context object.
  * @param contact_id The ID of the contact to block or unblock.
  * @param block 1=block contact, 0=unblock contact
- * @return None.
  */
 void            dc_block_contact             (dc_context_t* context, uint32_t contact_id, int block);
 
@@ -1828,10 +1719,10 @@ void            dc_block_contact             (dc_context_t* context, uint32_t co
 /**
  * Get encryption info for a contact.
  * Get a multi-line encryption info, containing your fingerprint and the
- * fingerprint of the contact, used eg. to compare the fingerprints for a simple out-of-band verification.
+ * fingerprint of the contact, used e.g. to compare the fingerprints for a simple out-of-band verification.
  *
  * @memberof dc_context_t
- * @param context The context object as created by dc_context_new().
+ * @param context The context object.
  * @param contact_id ID of the contact to get the encryption info for.
  * @return Multi-line text, must be released using dc_str_unref() after usage.
  */
@@ -1845,7 +1736,7 @@ char*           dc_get_contact_encrinfo      (dc_context_t* context, uint32_t co
  * May result in a #DC_EVENT_CONTACTS_CHANGED event.
  *
  * @memberof dc_context_t
- * @param context The context object as created by dc_context_new().
+ * @param context The context object.
  * @param contact_id ID of the contact to delete.
  * @return 1=success, 0=error
  */
@@ -1853,14 +1744,14 @@ int             dc_delete_contact            (dc_context_t* context, uint32_t co
 
 
 /**
- * Get a single contact object.  For a list, see eg. dc_get_contacts().
+ * Get a single contact object.  For a list, see e.g. dc_get_contacts().
  *
  * For contact DC_CONTACT_ID_SELF (1), the function returns sth.
  * like "Me" in the selected language and the email address
  * defined by dc_set_config().
  *
  * @memberof dc_context_t
- * @param context The context object as created by dc_context_new().
+ * @param context The context object.
  * @param contact_id ID of the contact to get the object for.
  * @return The contact object, must be freed using dc_contact_unref() when no
  *     longer used.  NULL on errors.
@@ -1878,16 +1769,13 @@ dc_contact_t*   dc_get_contact               (dc_context_t* context, uint32_t co
 
 /**
  * Import/export things.
- * For this purpose, the function creates a job that is executed in the IMAP-thread then;
- * this requires to call dc_perform_imap_jobs() regularly.
- *
  * What to do is defined by the _what_ parameter which may be one of the following:
  *
  * - **DC_IMEX_EXPORT_BACKUP** (11) - Export a backup to the directory given as `param1`.
  *   The backup contains all contacts, chats, images and other data and device independent settings.
  *   The backup does not contain device dependent settings as ringtones or LED notification settings.
- *   The name of the backup is typically `delta-chat.<day>.bak`, if more than one backup is create on a day,
- *   the format is `delta-chat.<day>-<number>.bak`
+ *   The name of the backup is typically `delta-chat-<day>.tar`, if more than one backup is create on a day,
+ *   the format is `delta-chat-<day>-<number>.tar`
  *
  * - **DC_IMEX_IMPORT_BACKUP** (12) - `param1` is the file (not: directory) to import. The file is normally
  *   created by DC_IMEX_EXPORT_BACKUP and detected by dc_imex_has_backup(). Importing a backup
@@ -1914,19 +1802,18 @@ dc_contact_t*   dc_get_contact               (dc_context_t* context, uint32_t co
  * To cancel an import-/export-progress, use dc_stop_ongoing_process().
  *
  * @memberof dc_context_t
- * @param context The context as created by dc_context_new().
+ * @param context The context.
  * @param what One of the DC_IMEX_* constants.
  * @param param1 Meaning depends on the DC_IMEX_* constants. If this parameter is a directory, it should not end with
  *     a slash (otherwise you'll get double slashes when receiving #DC_EVENT_IMEX_FILE_WRITTEN). Set to NULL if not used.
  * @param param2 Meaning depends on the DC_IMEX_* constants. Set to NULL if not used.
- * @return None.
  */
 void            dc_imex                      (dc_context_t* context, int what, const char* param1, const char* param2);
 
 
 /**
  * Check if there is a backup file.
- * May only be used on fresh installations (eg. dc_is_configured() returns 0).
+ * May only be used on fresh installations (e.g. dc_is_configured() returns 0).
  *
  * Example:
  *
@@ -1967,7 +1854,7 @@ void            dc_imex                      (dc_context_t* context, int what, c
  * ~~~
  *
  * @memberof dc_context_t
- * @param context The context as created by dc_context_new().
+ * @param context The context object.
  * @param dir Directory to search backups in.
  * @return String with the backup file, typically given to dc_imex(),
  *     returned strings must be released using dc_str_unref().
@@ -2019,7 +1906,7 @@ char*           dc_imex_has_backup           (dc_context_t* context, const char*
  * @memberof dc_context_t
  * @param context The context object.
  * @return The setup code. Must be released using dc_str_unref() after usage.
- *     On errors, eg. if the message could not be sent, NULL is returned.
+ *     On errors, e.g. if the message could not be sent, NULL is returned.
  */
 char*           dc_initiate_key_transfer     (dc_context_t* context);
 
@@ -2042,7 +1929,7 @@ char*           dc_initiate_key_transfer     (dc_context_t* context);
  *     There is no need to format the string correctly, the function will remove all spaces and other characters and
  *     insert the `-` characters at the correct places.
  * @return 1=key successfully decrypted and imported; both devices will use the same key now;
- *     0=key transfer failed eg. due to a bad setup code.
+ *     0=key transfer failed e.g. due to a bad setup code.
  */
 int             dc_continue_key_transfer     (dc_context_t* context, uint32_t msg_id, const char* setup_code);
 
@@ -2062,7 +1949,6 @@ int             dc_continue_key_transfer     (dc_context_t* context, uint32_t ms
  *
  * @memberof dc_context_t
  * @param context The context object.
- * @return None.
  */
 void            dc_stop_ongoing_process      (dc_context_t* context);
 
@@ -2074,6 +1960,8 @@ void            dc_stop_ongoing_process      (dc_context_t* context);
 #define         DC_QR_FPR_OK                 210 // id=contact
 #define         DC_QR_FPR_MISMATCH           220 // id=contact
 #define         DC_QR_FPR_WITHOUT_ADDR       230 // test1=formatted fingerprint
+#define         DC_QR_ACCOUNT                250 // text1=domain
+#define         DC_QR_WEBRTC_INSTANCE        260 // text1=domain
 #define         DC_QR_ADDR                   320 // id=contact
 #define         DC_QR_TEXT                   330 // text1=text
 #define         DC_QR_URL                    332 // text1=URL
@@ -2091,11 +1979,14 @@ void            dc_stop_ongoing_process      (dc_context_t* context);
  * - DC_QR_FPR_OK with dc_lot_t::id=Contact ID
  * - DC_QR_FPR_MISMATCH with dc_lot_t::id=Contact ID
  * - DC_QR_FPR_WITHOUT_ADDR with dc_lot_t::test1=Formatted fingerprint
+ * - DC_QR_ACCOUNT allows creation of an account, dc_lot_t::text1=domain
+ * - DC_QR_WEBRTC_INSTANCE - a shared webrtc-instance
+ *   that will be set if dc_set_config_from_qr() is called with the qr-code,
+ *   dc_lot_t::text1=domain could be used to ask the user
  * - DC_QR_ADDR with dc_lot_t::id=Contact ID
  * - DC_QR_TEXT with dc_lot_t::text1=Text
  * - DC_QR_URL with dc_lot_t::text1=URL
  * - DC_QR_ERROR with dc_lot_t::text1=Error string
- *
  *
  * @memberof dc_context_t
  * @param context The context object.
@@ -2107,20 +1998,22 @@ dc_lot_t*       dc_check_qr                  (dc_context_t* context, const char*
 
 
 /**
- * Get QR code text that will offer an secure-join verification.
+ * Get QR code text that will offer an Setup-Contact or Verified-Group invitation.
  * The QR code is compatible to the OPENPGP4FPR format
- * so that a basic fingerprint comparison also works eg. with OpenKeychain.
+ * so that a basic fingerprint comparison also works e.g. with OpenKeychain.
  *
  * The scanning device will pass the scanned content to dc_check_qr() then;
- * if this function returns DC_QR_ASK_VERIFYCONTACT or DC_QR_ASK_VERIFYGROUP
+ * if dc_check_qr() returns DC_QR_ASK_VERIFYCONTACT or DC_QR_ASK_VERIFYGROUP
  * an out-of-band-verification can be joined using dc_join_securejoin()
  *
  * @memberof dc_context_t
  * @param context The context object.
  * @param chat_id If set to a group-chat-id,
- *     the group-join-protocol is offered in the QR code;
- *     works for verified groups as well as for normal groups.
- *     If set to 0, the setup-Verified-contact-protocol is offered in the QR code.
+ *     the Verified-Group-Invite protocol is offered in the QR code;
+ *     works for protected groups as well as for normal groups.
+ *     If set to 0, the Setup-Contact protocol is offered in the QR code.
+ *     See https://countermitm.readthedocs.io/en/latest/new.html
+ *     for details about both protocols.
  * @return Text that should go to the QR code,
  *     On errors, an empty QR code is returned, NULL is never returned.
  *     The returned string must be released using dc_str_unref() after usage.
@@ -2129,13 +2022,29 @@ char*           dc_get_securejoin_qr         (dc_context_t* context, uint32_t ch
 
 
 /**
- * Join an out-of-band-verification initiated on another device with dc_get_securejoin_qr().
+ * Continue a Setup-Contact or Verified-Group-Invite protocol
+ * started on another device with dc_get_securejoin_qr().
  * This function is typically called when dc_check_qr() returns
  * lot.state=DC_QR_ASK_VERIFYCONTACT or lot.state=DC_QR_ASK_VERIFYGROUP.
  *
- * This function takes some time and sends and receives several messages.
- * You should call it in a separate thread; if you want to abort it, you should
- * call dc_stop_ongoing_process().
+ * Depending on the given QR code,
+ * this function may takes some time and sends and receives several messages.
+ * Therefore, you should call it always in a separate thread;
+ * if you want to abort it, you should call dc_stop_ongoing_process().
+ *
+ * - If the given QR code starts the Setup-Contact protocol,
+ *   the function typically returns immediately
+ *   and the handshake runs in background.
+ *   Subsequent calls of dc_join_securejoin() will abort unfinished tasks.
+ *   The returned chat is the one-to-one opportunistic chat.
+ *   When the protocol has finished, an info-message is added to that chat.
+ * - If the given QR code starts the Verified-Group-Invite protocol,
+ *   the function waits until the protocol has finished.
+ *   This is because the protected group is not opportunistic
+ *   and can be created only when the contacts have verified each other.
+ *
+ * See https://countermitm.readthedocs.io/en/latest/new.html
+ * for details about both protocols.
  *
  * @memberof dc_context_t
  * @param context The context object
@@ -2143,6 +2052,9 @@ char*           dc_get_securejoin_qr         (dc_context_t* context, uint32_t ch
  *     to dc_check_qr().
  * @return Chat-id of the joined chat, the UI may redirect to the this chat.
  *     If the out-of-band verification failed or was aborted, 0 is returned.
+ *     A returned chat-id does not guarantee that the chat is protected or the belonging contact is verified.
+ *     If needed, this be checked with dc_chat_is_protected() and dc_contact_is_verified(),
+ *     however, in practise, the UI will just listen to #DC_EVENT_CONTACTS_CHANGED unconditionally.
  */
 uint32_t        dc_join_securejoin           (dc_context_t* context, const char* qr);
 
@@ -2165,7 +2077,6 @@ uint32_t        dc_join_securejoin           (dc_context_t* context, const char*
  * @param chat_id Chat id to enable location streaming for.
  * @param seconds >0: enable location streaming for the given number of seconds;
  *     0: disable location streaming.
- * @return None.
  */
 void        dc_send_locations_to_chat       (dc_context_t* context, uint32_t chat_id, int seconds);
 
@@ -2288,7 +2199,6 @@ dc_array_t* dc_get_locations                (dc_context_t* context, uint32_t cha
  *
  * @memberof dc_context_t
  * @param context The context object.
- * @return None.
  */
 void        dc_delete_all_locations         (dc_context_t* context);
 
@@ -2299,13 +2209,245 @@ void        dc_delete_all_locations         (dc_context_t* context);
  *   MUST NOT be released by the standard free() function;
  *   always use dc_str_unref() for this purpose.
  * - dc_str_unref() MUST NOT be called for strings not returned by deltachat-core.
- * - dc_str_unref() MUST NOT be called for other objectes returned by deltachat-core.
+ * - dc_str_unref() MUST NOT be called for other objects returned by deltachat-core.
  *
  * @memberof dc_context_t
  * @param str The string to release.
- * @return None.
+ *     If NULL is given, nothing is done.
  */
 void dc_str_unref (char* str);
+
+
+/**
+ * @class dc_accounts_t
+ *
+ * This class provides functionality that can be used to
+ * manage several dc_context_t objects running at the same time.
+ * The account manager takes a directory where all
+ * context-databases are created in.
+ *
+ * You can add, remove, import account to the account manager,
+ * all context-databases are persisted and stay available once the
+ * account manager is created again for the same directory.
+ *
+ * All accounts may receive messages at the same time (e.g. by #DC_EVENT_INCOMING_MSG),
+ * and all accounts may be accessed by their own dc_context_t object.
+ *
+ * To make this possible, some dc_context_t functions must not be called
+ * when using the account manager:
+ * - use dc_accounts_add_account() and dc_accounts_get_account() instead of dc_context_new()
+ * - use dc_accounts_start_io() and dc_accounts_stop_io() instead of dc_start_io() and dc_stop_io()
+ * - use dc_accounts_maybe_network() instead of dc_maybe_network()
+ * - use dc_accounts_get_event_emitter() instead of dc_get_event_emitter()
+ *
+ * Additionally, there are functions to list, import and migrate accounts
+ * and to handle a "selected" account, see below.
+ */
+
+/**
+ * Create a new account manager.
+ * The account manager takes an directory
+ * where all context-databases are placed in.
+ * To add a context to the account manager,
+ * use dc_accounts_add_account(), dc_accounts_import_account or dc_accounts_migrate_account().
+ * All account information are persisted.
+ * To remove a context from the account manager,
+ * use dc_accounts_remove_account().
+ *
+ * @memberof dc_accounts_t
+ * @param os_name
+ * @param dir The directory to create the context-databases in.
+ *     If the directory does not exist,
+ *     dc_accounts_new() will try to create it.
+ * @return An account manager object.
+ *     The object must be passed to the other account manager functions
+ *     and must be freed using dc_accounts_unref() after usage.
+ *     On errors, NULL is returned.
+ */
+dc_accounts_t* dc_accounts_new                  (const char* os_name, const char* dir);
+
+
+/**
+ * Free an account manager object.
+ *
+ * @memberof dc_accounts_t
+ * @param accounts Account manager as created by dc_accounts_new().
+ */
+void           dc_accounts_unref                (dc_accounts_t* accounts);
+
+
+/**
+ * Add a new account to the account manager.
+ * Internally, dc_context_new() is called using a unique database-name
+ * in the directory specified at dc_accounts_new().
+ *
+ * If the function succeeds,
+ * dc_accounts_get_all() will return one more account
+ * and you can access the newly created account using dc_accounts_get_account().
+ * Moreover, the newly created account will be the selected one.
+ *
+ * @memberof dc_accounts_t
+ * @param accounts Account manager as created by dc_accounts_new().
+ * @return Account-id, use dc_accounts_get_account() to get the context object.
+ *     On errors, 0 is returned.
+ */
+uint32_t       dc_accounts_add_account          (dc_accounts_t* accounts);
+
+
+/**
+ * Import a tarfile-backup to the account manager.
+ * On success, a new account is added to the account-manager,
+ * with all the data provided by the backup-file.
+ * Moreover, the newly created account will be the selected one.
+ *
+ * @memberof dc_accounts_t
+ * @param accounts Account manager as created by dc_accounts_new().
+ * @param tarfile Backup as created by dc_imex().
+ * @return Account-id, use dc_accounts_get_account() to get the context object.
+ *     On errors, 0 is returned.
+ */
+uint32_t       dc_accounts_import_account       (dc_accounts_t* accounts, const char* tarfile);
+
+
+/**
+ * Migrate independent accounts into accounts managed by the account manager.
+ * This will _move_ the database-file and all blob-files to the directory managed
+ * by the account-manager
+ * (to save disk-space on small devices, the files are not _copied_
+ * Once the migration is done, the original file is no longer existent).
+ * Moreover, the newly created account will be the selected one.
+ *
+ * @memberof dc_accounts_t
+ * @param accounts Account manager as created by dc_accounts_new().
+ * @param dbfile Unmanaged database-file that was created at some point using dc_context_new().
+ * @return Account-id, use dc_accounts_get_account() to get the context object.
+ *     On errors, 0 is returned.
+ */
+uint32_t       dc_accounts_migrate_account      (dc_accounts_t* accounts, const char* dbfile);
+
+
+/**
+ * Remove an account from the account manager.
+ * This also removes the database-file and all blobs physically.
+ * If the removed account is the selected account,
+ * one of the other accounts will be selected.
+ *
+ * @memberof dc_accounts_t
+ * @param accounts Account manager as created by dc_accounts_new().
+ * @param account_id The account-id as returned e.g. by dc_accounts_add_account().
+ * @return 1=success, 0=error
+ */
+int            dc_accounts_remove_account       (dc_accounts_t* accounts, uint32_t account_id);
+
+
+/**
+ * List all accounts.
+ *
+ * @memberof dc_accounts_t
+ * @param accounts Account manager as created by dc_accounts_new().
+ * @return An array containing all account-ids,
+ *     use dc_array_get_id() to get the ids.
+ */
+dc_array_t*    dc_accounts_get_all              (dc_accounts_t* accounts);
+
+
+/**
+ * Get an account-context from an account-id.
+ *
+ * @memberof dc_accounts_t
+ * @param accounts Account manager as created by dc_accounts_new().
+ * @param account_id The account-id as returned e.g. by dc_accounts_get_all() or dc_accounts_add_account().
+ * @return The account-context, this can be used most similar as a normal,
+ *     unmanaged account-context as created by dc_context_new().
+ *     Once you do no longer need the context-object, you have to call dc_context_unref() on it,
+ *     which, however, will not close the account but only decrease a reference counter.
+ */
+dc_context_t*  dc_accounts_get_account          (dc_accounts_t* accounts, uint32_t account_id);
+
+
+/**
+ * Get the currently selected account.
+ * If there is at least one account in the account-manager,
+ * there is always a selected one.
+ * To change the selected account, use dc_accounts_select_account();
+ * also adding/importing/migrating accounts may change the selection.
+ *
+ * @memberof dc_accounts_t
+ * @param accounts Account manager as created by dc_accounts_new().
+ * @return The account-context, this can be used most similar as a normal,
+ *     unmanaged account-context as created by dc_context_new().
+ *     Once you do no longer need the context-object, you have to call dc_context_unref() on it,
+ *     which, however, will not close the account but only decrease a reference counter.
+ */
+dc_context_t*  dc_accounts_get_selected_account (dc_accounts_t* accounts);
+
+
+/**
+ * Change the selected account.
+ *
+ * @memberof dc_accounts_t
+ * @param accounts Account manager as created by dc_accounts_new().
+ * @param account_id The account-id as returned e.g. by dc_accounts_get_all() or dc_accounts_add_account().
+ * @return 1=success, 0=error
+ */
+int            dc_accounts_select_account       (dc_accounts_t* accounts, uint32_t account_id);
+
+
+/**
+ * Start job and IMAP/SMTP tasks for all accounts managed by the account manager.
+ * If IO is already running, nothing happens.
+ * This is similar to dc_start_io(), which, however,
+ * must not be called for accounts handled by the account manager.
+ *
+ * @memberof dc_accounts_t
+ * @param accounts Account manager as created by dc_accounts_new().
+ */
+void           dc_accounts_start_io             (dc_accounts_t* accounts);
+
+
+/**
+ * Stop job and IMAP/SMTP tasks for all accounts and return when they are finished.
+ * This is similar to dc_stop_io(), which, however,
+ * must not be called for accounts handled by the account manager.
+ *
+ * @memberof dc_accounts_t
+ * @param accounts Account manager as created by dc_accounts_new().
+ */
+void           dc_accounts_stop_io              (dc_accounts_t* accounts);
+
+
+/**
+ * This function should be called when there is a hint
+ * that the network is available again.
+ * This is similar to dc_maybe_network(), which, however,
+ * must not be called for accounts handled by the account manager.
+ *
+ * @memberof dc_accounts_t
+ * @param accounts Account manager as created by dc_accounts_new().
+ */
+void           dc_accounts_maybe_network        (dc_accounts_t* accounts);
+
+
+/**
+ * Create the event emitter that is used to receive events.
+ *
+ * The library will emit various @ref DC_EVENT events as "new message", "message read" etc.
+ * To get these events, you have to create an event emitter using this function
+ * and call dc_accounts_get_next_event() on the emitter.
+ *
+ * This is similar to dc_get_event_emitter(), which, however,
+ * must not be called for accounts handled by the account manager.
+ *
+ * @memberof dc_accounts_t
+ * @param accounts Account manager as created by dc_accounts_new().
+ * @return  Returns the event emitter, NULL on errors.
+ *     Must be freed using dc_accounts_event_emitter_unref() after usage.
+ *
+ * Note: Use only one event emitter per account manager.
+ * Having more than one event emitter running at the same time on the same account manager
+ * will result in events randomly delivered to the one or to the other.
+ */
+dc_accounts_event_emitter_t* dc_accounts_get_event_emitter (dc_accounts_t* accounts);
 
 
 /**
@@ -2323,9 +2465,8 @@ void dc_str_unref (char* str);
  *
  * @memberof dc_array_t
  * @param array The array object to free,
- *     created eg. by dc_get_chatlist(), dc_get_contacts() and so on.
+ *     created e.g. by dc_get_chatlist(), dc_get_contacts() and so on.
  *     If NULL is given, nothing is done.
- * @return None.
  */
 void             dc_array_unref              (dc_array_t* array);
 
@@ -2479,17 +2620,6 @@ int              dc_array_search_id          (const dc_array_t* array, uint32_t 
 
 
 /**
- * Get raw pointer to the data.
- *
- * @memberof dc_array_t
- * @param array The array object.
- * @return Raw pointer to the array. You MUST NOT free the data. You MUST NOT access the data beyond the current item count.
- *     It is not possible to enlarge the array this way.  Calling any other dc_array*()-function may discard the returned pointer.
- */
-const uint32_t*  dc_array_get_raw            (const dc_array_t* array);
-
-
-/**
  * @class dc_chatlist_t
  *
  * An object representing a single chatlist in memory.
@@ -2533,9 +2663,8 @@ const uint32_t*  dc_array_get_raw            (const dc_array_t* array);
  * Free a chatlist object.
  *
  * @memberof dc_chatlist_t
- * @param chatlist The chatlist object to free, created eg. by dc_get_chatlist(), dc_search_msgs().
+ * @param chatlist The chatlist object to free, created e.g. by dc_get_chatlist(), dc_search_msgs().
  *     If NULL is given, nothing is done.
- * @return None.
  */
 void             dc_chatlist_unref           (dc_chatlist_t* chatlist);
 
@@ -2544,7 +2673,7 @@ void             dc_chatlist_unref           (dc_chatlist_t* chatlist);
  * Find out the number of chats in a chatlist.
  *
  * @memberof dc_chatlist_t
- * @param chatlist The chatlist object as created eg. by dc_get_chatlist().
+ * @param chatlist The chatlist object as created e.g. by dc_get_chatlist().
  * @return Returns the number of items in a dc_chatlist_t object. 0 on errors or if the list is empty.
  */
 size_t           dc_chatlist_get_cnt         (const dc_chatlist_t* chatlist);
@@ -2556,7 +2685,7 @@ size_t           dc_chatlist_get_cnt         (const dc_chatlist_t* chatlist);
  * To get the message object from the message ID, use dc_get_chat().
  *
  * @memberof dc_chatlist_t
- * @param chatlist The chatlist object as created eg. by dc_get_chatlist().
+ * @param chatlist The chatlist object as created e.g. by dc_get_chatlist().
  * @param index The index to get the chat ID for.
  * @return Returns the chat_id of the item at the given index.  Index must be between
  *     0 and dc_chatlist_get_cnt()-1.
@@ -2570,10 +2699,10 @@ uint32_t         dc_chatlist_get_chat_id     (const dc_chatlist_t* chatlist, siz
  * To get the message object from the message ID, use dc_get_msg().
  *
  * @memberof dc_chatlist_t
- * @param chatlist The chatlist object as created eg. by dc_get_chatlist().
+ * @param chatlist The chatlist object as created e.g. by dc_get_chatlist().
  * @param index The index to get the chat ID for.
  * @return Returns the message_id of the item at the given index.  Index must be between
- *     0 and dc_chatlist_get_cnt()-1.  If there is no message at the given index (eg. the chat may be empty), 0 is returned.
+ *     0 and dc_chatlist_get_cnt()-1.  If there is no message at the given index (e.g. the chat may be empty), 0 is returned.
  */
 uint32_t         dc_chatlist_get_msg_id      (const dc_chatlist_t* chatlist, size_t index);
 
@@ -2591,20 +2720,42 @@ uint32_t         dc_chatlist_get_msg_id      (const dc_chatlist_t* chatlist, siz
  *   Typically used to show dc_lot_t::text1 with different colors. 0 if not applicable.
  *
  * - dc_lot_t::text2: contains an excerpt of the message text or strings as
- *   "No messages".  May be NULL of there is no such text (eg. for the archive link)
+ *   "No messages".  May be NULL of there is no such text (e.g. for the archive link)
  *
  * - dc_lot_t::timestamp: the timestamp of the message.  0 if not applicable.
  *
  * - dc_lot_t::state: The state of the message as one of the DC_STATE_* constants (see #dc_msg_get_state()).  0 if not applicable.
  *
  * @memberof dc_chatlist_t
- * @param chatlist The chatlist to query as returned eg. from dc_get_chatlist().
+ * @param chatlist The chatlist to query as returned e.g. from dc_get_chatlist().
  * @param index The index to query in the chatlist.
  * @param chat To speed up things, pass an already available chat object here.
  *     If the chat object is not yet available, it is faster to pass NULL.
  * @return The summary as an dc_lot_t object. Must be freed using dc_lot_unref().  NULL is never returned.
  */
 dc_lot_t*        dc_chatlist_get_summary     (const dc_chatlist_t* chatlist, size_t index, dc_chat_t* chat);
+
+
+/**
+ * Create a chatlist summary item when the chatlist object is already unref()'d.
+ *
+ * This function is similar to dc_chatlist_get_summary(), however,
+ * takes the chat-id and message-id as returned by dc_chatlist_get_chat_id() and dc_chatlist_get_msg_id()
+ * as arguments. The chatlist object itself is not needed directly.
+ *
+ * This maybe useful if you convert the complete object into a different represenation
+ * as done e.g. in the node-bindings.
+ * If you have access to the chatlist object in some way, using this function is not recommended,
+ * use dc_chatlist_get_summary() in this case instead.
+ *
+ * @memberof dc_context_t
+ * @param context The context object.
+ * @param chat_id Chat to get a summary for.
+ * @param msg_id Message to get a summary for.
+ * @return The summary as an dc_lot_t object, see dc_chatlist_get_summary() for details.
+ *     Must be freed using dc_lot_unref().  NULL is never returned.
+ */
+dc_lot_t*        dc_chatlist_get_summary2    (dc_context_t* context, uint32_t chat_id, uint32_t msg_id);
 
 
 /**
@@ -2618,9 +2769,9 @@ dc_context_t*    dc_chatlist_get_context     (dc_chatlist_t* chatlist);
 
 
 /**
- * Get info summary for a chat, in json format.
+ * Get info summary for a chat, in JSON format.
  *
- * The returned json string has the following key/values:
+ * The returned JSON string has the following key/values:
  *
  * id: chat id
  * name: chat/group name
@@ -2631,8 +2782,7 @@ dc_context_t*    dc_chatlist_get_context     (dc_chatlist_t* chatlist);
  * last-message-date:
  * avatar-path: path-to-blobfile
  * is_verified: yes/no
-
- * @return a utf8-encoded json string containing all requested info. Must be freed using dc_str_unref().  NULL is never returned.
+ * @return a UTF8-encoded JSON string containing all requested info. Must be freed using dc_str_unref().  NULL is never returned.
  */
 char*            dc_chat_get_info_json       (dc_context_t* context, size_t chat_id);
 
@@ -2640,7 +2790,7 @@ char*            dc_chat_get_info_json       (dc_context_t* context, size_t chat
  * @class dc_chat_t
  *
  * An object representing a single chat in memory.
- * Chat objects are created using eg. dc_get_chat()
+ * Chat objects are created using e.g. dc_get_chat()
  * and are not updated on database changes;
  * if you want an update, you have to recreate the object.
  */
@@ -2648,8 +2798,6 @@ char*            dc_chat_get_info_json       (dc_context_t* context, size_t chat
 
 #define         DC_CHAT_ID_DEADDROP          1 // virtual chat showing all messages belonging to chats flagged with chats.blocked=2
 #define         DC_CHAT_ID_TRASH             3 // messages that should be deleted get this chat_id; the messages are deleted from the working thread later then. This is also needed as rfc724_mid should be preset as long as the message is not deleted on the server (otherwise it is downloaded again)
-#define         DC_CHAT_ID_MSGS_IN_CREATION  4 // a message is just in creation but not yet assigned to a chat (eg. we may need the message ID to set up blobs; this avoids unready message to be sent and shown)
-#define         DC_CHAT_ID_STARRED           5 // virtual chat showing all messages flagged with msgs.starred=2
 #define         DC_CHAT_ID_ARCHIVED_LINK     6 // only an indicator in a chatlist
 #define         DC_CHAT_ID_ALLDONE_HINT      7 // only an indicator in a chatlist
 #define         DC_CHAT_ID_LAST_SPECIAL      9 // larger chat IDs are "real" chats, their messages are "real" messages.
@@ -2658,16 +2806,14 @@ char*            dc_chat_get_info_json       (dc_context_t* context, size_t chat
 #define         DC_CHAT_TYPE_UNDEFINED       0
 #define         DC_CHAT_TYPE_SINGLE          100
 #define         DC_CHAT_TYPE_GROUP           120
-#define         DC_CHAT_TYPE_VERIFIED_GROUP  130
 
 
 /**
  * Free a chat object.
  *
  * @memberof dc_chat_t
- * @param chat Chat object are returned eg. by dc_get_chat().
+ * @param chat Chat object are returned e.g. by dc_get_chat().
  *     If NULL is given, nothing is done.
- * @return None.
  */
 void            dc_chat_unref                (dc_chat_t* chat);
 
@@ -2677,7 +2823,6 @@ void            dc_chat_unref                (dc_chat_t* chat);
  *
  * Special IDs:
  * - DC_CHAT_ID_DEADDROP         (1) - Virtual chat containing messages which senders are not confirmed by the user.
- * - DC_CHAT_ID_STARRED          (5) - Virtual chat containing all starred messages-
  * - DC_CHAT_ID_ARCHIVED_LINK    (6) - A link at the end of the chatlist, if present the UI should show the button "Archived chats"-
  *
  * "Normal" chat IDs are larger than these special IDs (larger than DC_CHAT_ID_LAST_SPECIAL).
@@ -2701,9 +2846,6 @@ uint32_t        dc_chat_get_id               (const dc_chat_t* chat);
  * - DC_CHAT_TYPE_GROUP  (120) - a group chat, chats_contacts contain all group
  *   members, incl. DC_CONTACT_ID_SELF
  *
- * - DC_CHAT_TYPE_VERIFIED_GROUP  (130) - a verified group chat. In verified groups,
- *   all members are verified and encryption is always active and cannot be disabled.
- *
  * @memberof dc_chat_t
  * @param chat The chat object.
  * @return Chat type.
@@ -2713,7 +2855,7 @@ int             dc_chat_get_type             (const dc_chat_t* chat);
 
 /**
  * Get name of a chat. For one-to-one chats, this is the name of the contact.
- * For group chats, this is the name given eg. to dc_create_group_chat() or
+ * For group chats, this is the name given e.g. to dc_create_group_chat() or
  * received by a group-creation message.
  *
  * To change the name, use dc_set_chat_name()
@@ -2723,19 +2865,6 @@ int             dc_chat_get_type             (const dc_chat_t* chat);
  * @return Chat name as a string. Must be released using dc_str_unref() after usage. Never NULL.
  */
 char*           dc_chat_get_name             (const dc_chat_t* chat);
-
-
-/*
- * Get a subtitle for a chat.  The subtitle is eg. the email-address or the
- * number of group members.
- *
- * Deprecated function. Subtitles should be created in the ui
- * where plural forms and other specials can be handled more gracefully.
- *
- * @param chat The chat object to calulate the subtitle for.
- * @return Subtitle as a string. Must be released using dc_str_unref() after usage. Never NULL.
- */
-char*           dc_chat_get_subtitle         (const dc_chat_t* chat);
 
 
 /**
@@ -2770,21 +2899,14 @@ uint32_t        dc_chat_get_color            (const dc_chat_t* chat);
 
 
 /**
- * Get archived state.
- *
- * - 0 = normal chat, not archived, not sticky.
- * - 1 = chat archived
- * - 2 = chat sticky (reserved for future use, if you do not support this value, just treat the chat as a normal one)
- *
- * To archive or unarchive chats, use dc_archive_chat().
- * If chats are archived, this should be shown in the UI by a little icon or text,
- * eg. the search will also return archived chats.
+ * Get visibility of chat.
+ * See @ref DC_CHAT_VISIBILITY for detailed information about the visibilities.
  *
  * @memberof dc_chat_t
  * @param chat The chat object.
- * @return Archived state.
+ * @return One of @ref DC_CHAT_VISIBILITY
  */
-int             dc_chat_get_archived         (const dc_chat_t* chat);
+int             dc_chat_get_visibility       (const dc_chat_t* chat);
 
 
 /**
@@ -2826,7 +2948,7 @@ int             dc_chat_is_self_talk         (const dc_chat_t* chat);
  * Device-talks contain update information
  * and some hints that are added during the program runs, multi-device etc.
  *
- * From the ui view, device-talks are not very special,
+ * From the UI view, device-talks are not very special,
  * the user can delete and forward messages, archive the chat, set notifications etc.
  *
  * Messages can be added to the device-talk using dc_add_device_msg()
@@ -2840,10 +2962,10 @@ int             dc_chat_is_device_talk       (const dc_chat_t* chat);
 
 /**
  * Check if messages can be sent to a give chat.
- * This is not true eg. for the deaddrop or for the device-talk, cmp. dc_chat_is_device_talk().
+ * This is not true e.g. for the deaddrop or for the device-talk, cmp. dc_chat_is_device_talk().
  *
  * Calling dc_send_msg() for these chats will fail
- * and the ui may decide to hide input controls therefore.
+ * and the UI may decide to hide input controls therefore.
  *
  * @memberof dc_chat_t
  * @param chat The chat object.
@@ -2853,15 +2975,16 @@ int             dc_chat_can_send              (const dc_chat_t* chat);
 
 
 /**
- * Check if a chat is verified.  Verified chats contain only verified members
- * and encryption is alwasy enabled.  Verified chats are created using
- * dc_create_group_chat() by setting the 'verified' parameter to true.
+ * Check if a chat is protected.
+ * Protected chats contain only verified members and encryption is always enabled.
+ * Protected chats are created using dc_create_group_chat() by setting the 'protect' parameter to 1.
+ * The status can be changed using dc_set_chat_protection().
  *
  * @memberof dc_chat_t
  * @param chat The chat object.
- * @return 1=chat verified, 0=chat is not verified
+ * @return 1=chat protected, 0=chat is not protected
  */
-int             dc_chat_is_verified          (const dc_chat_t* chat);
+int             dc_chat_is_protected         (const dc_chat_t* chat);
 
 
 /**
@@ -2875,6 +2998,26 @@ int             dc_chat_is_verified          (const dc_chat_t* chat);
  * @return 1=locations are sent to chat, 0=no locations are sent to chat
  */
 int             dc_chat_is_sending_locations (const dc_chat_t* chat);
+
+
+/**
+ * Check whether the chat is currently muted (can be changed by dc_set_chat_mute_duration()).
+ *
+ * @memberof dc_chat_t
+ * @param chat The chat object.
+ * @return 1=muted, 0=not muted
+ */
+int             dc_chat_is_muted (const dc_chat_t* chat);
+
+
+/**
+ * Get the exact state of the mute of a chat
+ *
+ * @memberof dc_chat_t
+ * @param chat The chat object.
+ * @return 0=not muted, -1=forever muted, (x>0)=remaining seconds until the mute is lifted
+ */
+int64_t          dc_chat_get_remaining_mute_duration (const dc_chat_t* chat);
 
 
 /**
@@ -2908,8 +3051,8 @@ int             dc_chat_is_sending_locations (const dc_chat_t* chat);
 
 
 /**
- * Create new message object. Message objects are needed eg. for sending messages using
- * dc_send_msg().  Moreover, they are returned eg. from dc_get_msg(),
+ * Create new message object. Message objects are needed e.g. for sending messages using
+ * dc_send_msg().  Moreover, they are returned e.g. from dc_get_msg(),
  * set up with the current state of a message. The message object is not updated;
  * to achieve this, you have to recreate it.
  *
@@ -2923,12 +3066,11 @@ dc_msg_t*       dc_msg_new                    (dc_context_t* context, int viewty
 
 
 /**
- * Free a message object. Message objects are created eg. by dc_get_msg().
+ * Free a message object. Message objects are created e.g. by dc_get_msg().
  *
  * @memberof dc_msg_t
  * @param msg The message object to free.
  *     If NULL is given, nothing is done.
- * @return None.
  */
 void            dc_msg_unref                  (dc_msg_t* msg);
 
@@ -3004,11 +3146,14 @@ int             dc_msg_get_viewtype           (const dc_msg_t* msg);
  *   If a sent message changes to this state, you'll receive the event #DC_EVENT_MSG_DELIVERED.
  * - DC_STATE_OUT_MDN_RCVD (28) - Outgoing message read by the recipient (two checkmarks; this requires goodwill on the receiver's side)
  *   If a sent message changes to this state, you'll receive the event #DC_EVENT_MSG_READ.
+ *   Also messages already read by some recipients
+ *   may get into the state DC_STATE_OUT_FAILED at a later point,
+ *   e.g. when in a group, delivery fails for some recipients.
  *
  * If you just want to check if a message is sent or not, please use dc_msg_is_sent() which regards all states accordingly.
  *
  * The state of just created message objects is DC_STATE_UNDEFINED (0).
- * The state is always set by the core-library, users of the library cannot set the state directly, but it is changed implicitly eg.
+ * The state is always set by the core-library, users of the library cannot set the state directly, but it is changed implicitly e.g.
  * when calling  dc_marknoticed_chat() or dc_markseen_msgs().
  *
  * @memberof dc_msg_t
@@ -3022,7 +3167,7 @@ int             dc_msg_get_state              (const dc_msg_t* msg);
  * Get message sending time.
  * The sending time is returned as a unix timestamp in seconds.
  *
- * Note that the message lists returned eg. by dc_get_chat_msgs()
+ * Note that the message lists returned e.g. by dc_get_chat_msgs()
  * are not sorted by the _sending_ time but by the _receiving_ time.
  * This ensures newly received messages always pop up at the end of the list,
  * however, for delayed messages, the correct sending time will be displayed.
@@ -3054,7 +3199,7 @@ int64_t          dc_msg_get_received_timestamp (const dc_msg_t* msg);
 /**
  * Get message time used for sorting.
  * This function returns the timestamp that is used for sorting the message
- * into lists as returned eg. by dc_get_chat_msgs().
+ * into lists as returned e.g. by dc_get_chat_msgs().
  * This may be the reveived time, the sending time or another time.
  *
  * To get the receiving time, use dc_msg_get_received_timestamp().
@@ -3077,7 +3222,7 @@ int64_t          dc_msg_get_sort_timestamp     (const dc_msg_t* msg);
  * it does not make sense to show more text in the message list and typical controls
  * will have problems with showing much more text.
  * This max. length is to avoid passing _lots_ of data to the frontend which may
- * result eg. from decoding errors (assume some bytes missing in a mime structure, forcing
+ * result e.g. from decoding errors (assume some bytes missing in a mime structure, forcing
  * an attachment to be plain text).
  *
  * To get information about the message and more/raw text, use dc_get_msg_info().
@@ -3135,7 +3280,7 @@ char*           dc_msg_get_filemime           (const dc_msg_t* msg);
  * Get the size of the file.  Returns the size of the file associated with a
  * message, if applicable.
  *
- * Typically, this is used to show the size of document messages, eg. a PDF.
+ * Typically, this is used to show the size of document messages, e.g. a PDF.
  *
  * @memberof dc_msg_t
  * @param msg The message object.
@@ -3200,6 +3345,34 @@ int             dc_msg_get_duration           (const dc_msg_t* msg);
  * @return 1=padlock should be shown beside message, 0=do not show a padlock beside the message.
  */
 int             dc_msg_get_showpadlock        (const dc_msg_t* msg);
+
+
+/**
+ * Get ephemeral timer duration for message.
+ * This is the value of dc_get_chat_ephemeral_timer() in the moment the message was sent.
+ *
+ * To check if the timer is started and calculate remaining time,
+ * use dc_msg_get_ephemeral_timestamp().
+ *
+ * @memberof dc_msg_t
+ * @param msg The message object.
+ * @return Duration in seconds, or 0 if no timer is set.
+ */
+uint32_t        dc_msg_get_ephemeral_timer    (const dc_msg_t* msg);
+
+/**
+ * Get timestamp of ephemeral message removal.
+ *
+ * If returned value is non-zero, you can calculate the * fraction of
+ * time remaining by divinding the difference between the current timestamp
+ * and this timestamp by dc_msg_get_ephemeral_timer().
+ *
+ * @memberof dc_msg_t
+ * @param msg The message object.
+ * @return Time of message removal, 0 if the timer is not yet started
+ *     (the timer starts on sending messages or when dc_markseen_msgs() is called)
+ */
+int64_t          dc_msg_get_ephemeral_timestamp (const dc_msg_t* msg);
 
 
 /**
@@ -3284,21 +3457,6 @@ int             dc_msg_is_sent                (const dc_msg_t* msg);
 
 
 /**
- * Check if a message is starred.  Starred messages are "favorites" marked by the user
- * with a "star" or something like that.  Starred messages can typically be shown
- * easily and are not deleted automatically.
- *
- * To star one or more messages, use dc_star_msgs(), to get a list of starred messages,
- * use dc_get_chat_msgs() using DC_CHAT_ID_STARRED as the chat_id.
- *
- * @memberof dc_msg_t
- * @param msg The message object.
- * @return 1=message is starred, 0=message not starred.
- */
-int             dc_msg_is_starred             (const dc_msg_t* msg);
-
-
-/**
  * Check if the message is a forwarded message.
  *
  * Forwarded messages may not be created by the contact given as "from".
@@ -3320,7 +3478,8 @@ int             dc_msg_is_forwarded           (const dc_msg_t* msg);
 /**
  * Check if the message is an informational message, created by the
  * device or by another users. Such messages are not "typed" by the user but
- * created due to other actions, eg. dc_set_chat_name(), dc_set_chat_profile_image()
+ * created due to other actions,
+ * e.g. dc_set_chat_name(), dc_set_chat_profile_image(), dc_set_chat_protection()
  * or dc_add_contact_to_chat().
  *
  * These messages are typically shown in the center of the chat view,
@@ -3334,6 +3493,32 @@ int             dc_msg_is_forwarded           (const dc_msg_t* msg);
  * @return 1=message is a system command, 0=normal message
  */
 int             dc_msg_is_info                (const dc_msg_t* msg);
+
+
+/**
+ * Get the type of an informational message.
+ * If dc_msg_is_info() returns 1, this function returns the type of the informational message.
+ * UIs can display e.g. an icon based upon the type.
+ *
+ * Currently, the following types are defined:
+ * - DC_INFO_PROTECTION_ENABLED (11) - Info-message for "Chat is now protected"
+ * - DC_INFO_PROTECTION_DISABLED (12) - Info-message for "Chat is no longer protected"
+ *
+ * Even when you display an icon,
+ * you should still display the text of the informational message using dc_msg_get_text()
+ *
+ * @memberof dc_msg_t
+ * @param msg The message object.
+ * @return One of the DC_INFO* constants.
+ *     0 or other values indicate unspecified types
+ *     or that the message is not an info-message.
+ */
+int             dc_msg_get_info_type          (const dc_msg_t* msg);
+
+
+// DC_INFO* uses the same values as SystemMessage in rust-land
+#define         DC_INFO_PROTECTION_ENABLED     11
+#define         DC_INFO_PROTECTION_DISABLED    12
 
 
 /**
@@ -3354,7 +3539,7 @@ int             dc_msg_is_increation          (const dc_msg_t* msg);
 /**
  * Check if the message is an Autocrypt Setup Message.
  *
- * Setup messages should be shown in an unique way eg. using a different text color.
+ * Setup messages should be shown in an unique way e.g. using a different text color.
  * On a click or another action, the user should be prompted for the setup code
  * which is forwarded to dc_continue_key_transfer() then.
  *
@@ -3363,7 +3548,7 @@ int             dc_msg_is_increation          (const dc_msg_t* msg);
  * @memberof dc_msg_t
  * @param msg The message object.
  * @return 1=message is a setup message, 0=no setup message.
- *     For setup messages, dc_msg_get_viewtype() returns DC_MSG_FILE.
+ *     For setup messages, dc_msg_get_viewtype() returns #DC_MSG_FILE.
  */
 int             dc_msg_is_setupmessage        (const dc_msg_t* msg);
 
@@ -3386,15 +3571,139 @@ char*           dc_msg_get_setupcodebegin     (const dc_msg_t* msg);
 
 
 /**
+ * Get url of a videochat invitation.
+ *
+ * Videochat invitations are sent out using dc_send_videochat_invitation()
+ * and dc_msg_get_viewtype() returns #DC_MSG_VIDEOCHAT_INVITATION for such invitations.
+ *
+ * @memberof dc_msg_t
+ * @param msg The message object.
+ * @return If the message contains a videochat invitation,
+ *     the url of the invitation is returned.
+ *     If the message is no videochat invitation, NULL is returned.
+ *     Must be released using dc_str_unref() when done.
+ */
+char* dc_msg_get_videochat_url (const dc_msg_t* msg);
+
+/**
+ * Gets the error status of the message.
+ * If there is no error associated with the message, NULL is returned.
+ *
+ * A message can have an associated error status if something went wrong when sending or
+ * receiving message itself.  The error status is free-form text and should not be further parsed,
+ * rather it's presence is meant to indicate *something* went wrong with the message and the
+ * text of the error is detailed information on what.
+ * 
+ * Some common reasons error can be associated with messages are:
+ * * Lack of valid signature on an e2ee message, usually for received messages.
+ * * Failure to decrypt an e2ee message, usually for received messages.
+ * * When a message could not be delivered to one or more recipients the non-delivery
+ *   notification text can be stored in the error status.
+ *
+ * @memberof dc_msg_t
+ * @param msg The message object.
+ * @return Error or NULL. The result must be released using dc_str_unref().
+ */
+char*           dc_msg_get_error               (const dc_msg_t* msg);
+
+
+/**
+ * Get type of videochat.
+ *
+ * Calling this functions only makes sense for messages of type #DC_MSG_VIDEOCHAT_INVITATION,
+ * in this case, if `basicwebrtc:` as of https://github.com/cracker0dks/basicwebrtc or `jitsi`
+ * were used to initiate the videochat,
+ * dc_msg_get_videochat_type() returns the corresponding type.
+ *
+ * The videochat-url can be retrieved using dc_msg_get_videochat_url().
+ * To check if a message is a videochat invitation at all, check the message type for #DC_MSG_VIDEOCHAT_INVITATION.
+ *
+ * @memberof dc_msg_t
+ * @param msg The message object.
+ * @return Type of the videochat as of DC_VIDEOCHATTYPE_BASICWEBRTC, DC_VIDEOCHATTYPE_JITSI or DC_VIDEOCHATTYPE_UNKNOWN.
+ *
+ * Example:
+ * ~~~
+ * if (dc_msg_get_viewtype(msg) == DC_MSG_VIDEOCHAT_INVITATION) {
+ *   if (dc_msg_get_videochat_type(msg) == DC_VIDEOCHATTYPE_BASICWEBRTC) {
+ *       // videochat invitation that we ship a client for
+ *   } else {
+ *       // use browser for videochat - or add an additional check for DC_VIDEOCHATTYPE_JITSI
+ *   }
+ * } else {
+ *    // not a videochat invitation
+ * }
+ * ~~~
+ */
+int dc_msg_get_videochat_type (const dc_msg_t* msg);
+
+#define DC_VIDEOCHATTYPE_UNKNOWN     0
+#define DC_VIDEOCHATTYPE_BASICWEBRTC 1
+#define DC_VIDEOCHATTYPE_JITSI       2
+
+
+/**
+ * Checks if the message has a full HTML version.
+ *
+ * Messages have a full HTML version
+ * if the original message _may_ contain important parts
+ * that are removed by some heuristics
+ * or if the message is just too long or too complex
+ * to get displayed properly by just using plain text.
+ * If so, the UI should offer a button as
+ * "Show full message" that shows the uncut message using dc_get_msg_html().
+ *
+ * Even if a "Show full message" button is recommended,
+ * the UI should display the text in the bubble
+ * using the normal dc_msg_get_text() function -
+ * which will still be fine in many cases.
+ *
+ * @memberof dc_msg_t
+ * @param msg The message object.
+ * @return 0=Message as displayed using dc_msg_get_text() is just fine;
+ *     1=The message has a full HTML version,
+ *     should be displayed using dc_msg_get_text()
+ *     and a button to show the full version should be offered
+ */
+int dc_msg_has_html (dc_msg_t* msg);
+
+
+/**
  * Set the text of a message object.
  * This does not alter any information in the database; this may be done by dc_send_msg() later.
  *
  * @memberof dc_msg_t
  * @param msg The message object.
  * @param text Message text.
- * @return None.
  */
 void            dc_msg_set_text               (dc_msg_t* msg, const char* text);
+
+
+/**
+ * Set the HTML part of a message object.
+ * As for all other dc_msg_t setters,
+ * this is only useful if the message is sent using dc_send_msg() later.
+ *
+ * Please note, that Delta Chat clients show the plain text set with
+ * dc_msg_set_text() at the first place;
+ * the HTML part is not shown instead of this text.
+ * However, for messages with HTML parts,
+ * on the receiver's device, dc_msg_has_html() will return 1
+ * and a button "Show full message" is typically shown.
+ *
+ * So adding a HTML part might be useful eg. for bots,
+ * that want to add rich content to a message, eg. a website;
+ * this HTML part is similar to an attachment then.
+ *
+ * **dc_msg_set_html() is currently not meant for sending a message,
+ * a "normal user" has typed in!**
+ * Use dc_msg_set_text() for that purpose.
+ *
+ * @memberof dc_msg_t
+ * @param msg The message object.
+ * @param html HTML to send.
+ */
+void            dc_msg_set_html               (dc_msg_t* msg, const char* html);
 
 
 /**
@@ -3408,7 +3717,6 @@ void            dc_msg_set_text               (dc_msg_t* msg, const char* text);
  * @param file If the message object is used in dc_send_msg() later,
  *     this must be the full path of the image file to send.
  * @param filemime Mime type of the file. NULL if you don't know or don't care.
- * @return None.
  */
 void            dc_msg_set_file               (dc_msg_t* msg, const char* file, const char* filemime);
 
@@ -3422,7 +3730,6 @@ void            dc_msg_set_file               (dc_msg_t* msg, const char* file, 
  * @param msg The message object.
  * @param width Width in pixels, if known. 0 if you don't know or don't care.
  * @param height Height in pixels, if known. 0 if you don't know or don't care.
- * @return None.
  */
 void            dc_msg_set_dimension          (dc_msg_t* msg, int width, int height);
 
@@ -3435,7 +3742,6 @@ void            dc_msg_set_dimension          (dc_msg_t* msg, int width, int hei
  * @memberof dc_msg_t
  * @param msg The message object.
  * @param duration Length in milliseconds. 0 if you don't know or don't care.
- * @return None.
  */
 void            dc_msg_set_duration           (dc_msg_t* msg, int duration);
 
@@ -3455,7 +3761,6 @@ void            dc_msg_set_duration           (dc_msg_t* msg, int duration);
  * @param msg The message object.
  * @param latitude North-south position of the location.
  * @param longitude East-west position of the location.
- * @return None.
  */
 void            dc_msg_set_location           (dc_msg_t* msg, double latitude, double longitude);
 
@@ -3480,9 +3785,65 @@ void            dc_msg_set_location           (dc_msg_t* msg, double latitude, d
  * @param width The new width to store in the message object. 0 if you do not want to change width and height.
  * @param height The new height to store in the message object. 0 if you do not want to change width and height.
  * @param duration The new duration to store in the message object. 0 if you do not want to change it.
- * @return None.
  */
 void            dc_msg_latefiling_mediasize   (dc_msg_t* msg, int width, int height, int duration);
+
+
+/**
+ * Set the message replying to.
+ * This allows optionally to reply to an explicit message
+ * instead of replying implicitly to the end of the chat.
+ *
+ * dc_msg_set_quote() copies some basic data from the quoted message object
+ * so that dc_msg_get_quoted_text() will always work.
+ * dc_msg_get_quoted_msg() gets back the quoted message only if it is _not_ deleted.
+ *
+ * @memberof dc_msg_t
+ * @param msg The message object to set the reply to.
+ * @param quote The quote to set for msg.
+ */
+void             dc_msg_set_quote             (dc_msg_t* msg, const dc_msg_t* quote);
+
+
+/**
+ * Get quoted text, if any.
+ * You can use this function also check if there is a quote for a message.
+ *
+ * The text is a summary of the original text,
+ * similar to what is shown in the chatlist.
+ *
+ * If available, you can get the whole quoted message object using dc_msg_get_quoted_msg().
+ *
+ * @memberof dc_msg_t
+ * @param msg The message object.
+ * @return The quoted text or NULL if there is no quote.
+ *     Returned strings must be released using dc_str_unref().
+ */
+char*           dc_msg_get_quoted_text        (const dc_msg_t* msg);
+
+
+/**
+ * Get quoted message, if available.
+ * UIs might use this information to offer "jumping back" to the quoted message
+ * or to enrich displaying the quote.
+ *
+ * If this function returns NULL,
+ * this does not mean there is no quote for the message -
+ * it might also mean that a quote exist but the quoted message is deleted meanwhile.
+ * Therefore, do not use this function to check if there is a quote for a message.
+ * To check if a message has a quote, use dc_msg_get_quoted_text().
+ *
+ * To display the quote in the chat, use dc_msg_get_quoted_text() as a primary source,
+ * however, one might add information from the message object (e.g. an image).
+ *
+ * It is not guaranteed that the message belong to the same chat.
+ *
+ * @memberof dc_msg_t
+ * @param msg The message object.
+ * @return The quoted message or NULL.
+ *     Must be freed using dc_msg_unref() after usage.
+ */
+dc_msg_t*       dc_msg_get_quoted_msg         (const dc_msg_t* msg);
 
 
 /**
@@ -3499,8 +3860,8 @@ void            dc_msg_latefiling_mediasize   (dc_msg_t* msg, int width, int hei
  * authorized-name and given-name.
  * By default, these names are equal,
  * but functions working with contact names
- * (eg. dc_contact_get_name(), dc_contact_get_display_name(),
- * dc_contact_get_name_n_addr(), dc_contact_get_first_name(),
+ * (e.g. dc_contact_get_name(), dc_contact_get_display_name(),
+ * dc_contact_get_name_n_addr(),
  * dc_create_contact() or dc_add_address_book())
  * only affect the given-name.
  */
@@ -3516,9 +3877,8 @@ void            dc_msg_latefiling_mediasize   (dc_msg_t* msg, int width, int hei
  * Free a contact object.
  *
  * @memberof dc_contact_t
- * @param contact The contact object as created eg. by dc_get_contact().
+ * @param contact The contact object as created e.g. by dc_get_contact().
  *     If NULL is given, nothing is done.
- * @return None.
  */
 void            dc_contact_unref             (dc_contact_t* contact);
 
@@ -3574,6 +3934,11 @@ char*           dc_contact_get_name          (const dc_contact_t* contact);
 char*           dc_contact_get_display_name  (const dc_contact_t* contact);
 
 
+// dc_contact_get_first_name is removed,
+// the following define is to make upgrading more smoothly.
+#define         dc_contact_get_first_name    dc_contact_get_display_name
+
+
 /**
  * Get a summary of name and address.
  *
@@ -3581,7 +3946,7 @@ char*           dc_contact_get_display_name  (const dc_contact_t* contact);
  * "email@domain.com" if the name is unset.
  *
  * The summary is typically used when asking the user something about the contact.
- * The attached email address makes the question unique, eg. "Chat with Alan Miller (am@uniquedomain.com)?"
+ * The attached email address makes the question unique, e.g. "Chat with Alan Miller (am@uniquedomain.com)?"
  *
  * @memberof dc_contact_t
  * @param contact The contact object.
@@ -3589,19 +3954,6 @@ char*           dc_contact_get_display_name  (const dc_contact_t* contact);
  *     Never returns NULL.
  */
 char*           dc_contact_get_name_n_addr   (const dc_contact_t* contact);
-
-
-/**
- * Get the part of the name before the first space. In most languages, this seems to be
- * the prename. If there is no space, the full display name is returned.
- * If the display name is not set, the e-mail address is returned.
- *
- * @memberof dc_contact_t
- * @param contact The contact object.
- * @return String with the name to display, must be released using dc_str_unref().
- *     Never returns NULL.
- */
-char*           dc_contact_get_first_name    (const dc_contact_t* contact);
 
 
 /**
@@ -3666,29 +4018,18 @@ int             dc_contact_is_verified       (dc_contact_t* contact);
 
 
 /**
- * Create a provider struct for the given domain.
- *
- * @memberof dc_provider_t
- * @param domain The domain to get provider info for.
- * @return a dc_provider_t struct which can be used with the dc_provider_get_*
- *     accessor functions.  If no provider info is found, NULL will be
- *     returned.
- */
-dc_provider_t*  dc_provider_new_from_domain           (const char* domain);
-
-
-/**
  * Create a provider struct for the given email address.
  *
  * The provider is extracted from the email address and it's information is returned.
  *
  * @memberof dc_provider_t
+ * @param context The context object.
  * @param email The user's email address to extract the provider info form.
  * @return a dc_provider_t struct which can be used with the dc_provider_get_*
  *     accessor functions.  If no provider info is found, NULL will be
  *     returned.
  */
-dc_provider_t*  dc_provider_new_from_email            (const char* email);
+dc_provider_t*  dc_provider_new_from_email            (const dc_context_t* context, const char* email);
 
 
 /**
@@ -3698,53 +4039,35 @@ dc_provider_t*  dc_provider_new_from_email            (const char* email);
  *
  * @memberof dc_provider_t
  * @param provider The dc_provider_t struct.
- * @return A string which must be released using dc_str_unref().
+ * @return String with a fully-qualified URL,
+ *     if there is no such URL, an empty string is returned, NULL is never returned.
+ *     The returned value must be released using dc_str_unref().
  */
 char*           dc_provider_get_overview_page         (const dc_provider_t* provider);
 
 
 /**
- * The provider's name.
+ * Get hints to be shown to the user on the login screen.
+ * Depending on the @ref DC_PROVIDER_STATUS returned by dc_provider_get_status(),
+ * the UI may want to highlight the hint.
  *
- * The name of the provider, e.g. "POSTEO".
- *
- * @memberof dc_provider_t
- * @param provider The dc_provider_t struct.
- * @return A string which must be released using dc_str_unref().
- */
-char*           dc_provider_get_name                  (const dc_provider_t* provider);
-
-
-/**
- * The markdown content of the providers page.
- *
- * This contains the preparation steps or additional information if the status
- * is @ref DC_PROVIDER_STATUS_BROKEN.
+ * Moreover, the UI should display a "More information" link
+ * that forwards to the url returned by dc_provider_get_overview_page().
  *
  * @memberof dc_provider_t
  * @param provider The dc_provider_t struct.
- * @return A string which must be released using dc_str_unref().
+ * @return A string with the hint to show to the user, may contain multiple lines,
+ *     if there is no such hint, an empty string is returned, NULL is never returned.
+ *     The returned value must be released using dc_str_unref().
  */
-char*           dc_provider_get_markdown              (const dc_provider_t* provider);
-
-
-/**
- * Date of when the state was last checked/updated.
- *
- * This is returned as a string.
- *
- * @memberof dc_provider_t
- * @param provider The dc_provider_t struct.
- * @return A string which must be released using dc_str_unref().
- */
-char*           dc_provider_get_status_date           (const dc_provider_t* provider);
+char*           dc_provider_get_before_login_hint     (const dc_provider_t* provider);
 
 
 /**
  * Whether DC works with this provider.
  *
- * Can be one of @ref DC_PROVIDER_STATUS_OK, @ref
- * DC_PROVIDER_STATUS_PREPARATION and @ref DC_PROVIDER_STATUS_BROKEN.
+ * Can be one of #DC_PROVIDER_STATUS_OK,
+ * #DC_PROVIDER_STATUS_PREPARATION or #DC_PROVIDER_STATUS_BROKEN.
  *
  * @memberof dc_provider_t
  * @param provider The dc_provider_t struct.
@@ -3759,7 +4082,7 @@ int             dc_provider_get_status                (const dc_provider_t* prov
  * @memberof dc_provider_t
  * @param provider The dc_provider_t struct.
  */
-void            dc_provider_unref                     (const dc_provider_t* provider);
+void            dc_provider_unref                     (dc_provider_t* provider);
 
 
 /**
@@ -3768,7 +4091,7 @@ void            dc_provider_unref                     (const dc_provider_t* prov
  * An object containing a set of values.
  * The meaning of the values is defined by the function returning the object.
  * Lot objects are created
- * eg. by dc_chatlist_get_summary() or dc_msg_get_summary().
+ * e.g. by dc_chatlist_get_summary() or dc_msg_get_summary().
  *
  * NB: _Lot_ is used in the meaning _heap_ here.
  */
@@ -3782,12 +4105,11 @@ void            dc_provider_unref                     (const dc_provider_t* prov
 /**
  * Frees an object containing a set of parameters.
  * If the set object contains strings, the strings are also freed with this function.
- * Set objects are created eg. by dc_chatlist_get_summary() or dc_msg_get_summary().
+ * Set objects are created e.g. by dc_chatlist_get_summary() or dc_msg_get_summary().
  *
  * @memberof dc_lot_t
  * @param lot The object to free.
  *     If NULL is given, nothing is done.
- * @return None.
  */
 void            dc_lot_unref             (dc_lot_t* lot);
 
@@ -3817,7 +4139,7 @@ char*           dc_lot_get_text2         (const dc_lot_t* lot);
 
 
 /**
- * Get the meaning of the first string.  Posssible meanings of the string are defined by the creator of the object and may be returned eg.
+ * Get the meaning of the first string.  Posssible meanings of the string are defined by the creator of the object and may be returned e.g.
  * as DC_TEXT1_DRAFT, DC_TEXT1_USERNAME or DC_TEXT1_SELF.
  *
  * @memberof dc_lot_t
@@ -3867,12 +4189,15 @@ int64_t          dc_lot_get_timestamp     (const dc_lot_t* lot);
  *
  * From the view of the library,
  * all types are primary types of the same level,
- * eg. the library does not regard #DC_MSG_GIF as a subtype for #DC_MSG_IMAGE
+ * e.g. the library does not regard #DC_MSG_GIF as a subtype for #DC_MSG_IMAGE
  * and it's up to the UI to decide whether a GIF is shown
- * eg. in an IMAGE or in a VIDEO container.
+ * e.g. in an IMAGE or in a VIDEO container.
  *
  * If you want to define the type of a dc_msg_t object for sending,
  * use dc_msg_new().
+ * Depending on the type, you will set more properties using e.g.
+ * dc_msg_set_text() or dc_msg_set_file().
+ * To finally send the message, use dc_send_msg().
  *
  * To get the types of dc_msg_t objects received, use dc_msg_get_viewtype().
  *
@@ -3891,9 +4216,14 @@ int64_t          dc_lot_get_timestamp     (const dc_lot_t* lot);
 
 /**
  * Image message.
- * If the image is an animated GIF, the type DC_MSG_GIF should be used.
- * File, width and height are set via dc_msg_set_file(), dc_msg_set_dimension
- * and retrieved via dc_msg_set_file(), dc_msg_set_dimension().
+ * If the image is an animated GIF, the type #DC_MSG_GIF should be used.
+ * File, width and height are set via dc_msg_set_file(), dc_msg_set_dimension()
+ * and retrieved via dc_msg_get_file(), dc_msg_get_width(), dc_msg_get_height().
+ *
+ * Before sending, the image is recoded to an reasonable size,
+ * see dc_set_config()-option `media_quality`.
+ * If you do not want images to be recoded,
+ * send them as #DC_MSG_FILE.
  */
 #define DC_MSG_IMAGE     20
 
@@ -3908,7 +4238,7 @@ int64_t          dc_lot_get_timestamp     (const dc_lot_t* lot);
 
 /**
  * Message containing a sticker, similar to image.
- * If possible, the ui should display the image without borders in a transparent way.
+ * If possible, the UI should display the image without borders in a transparent way.
  * A click on a sticker will offer to install the sticker set in some future.
  */
 #define DC_MSG_STICKER     23
@@ -3943,11 +4273,61 @@ int64_t          dc_lot_get_timestamp     (const dc_lot_t* lot);
 
 
 /**
- * Message containing any file, eg. a PDF.
+ * Message containing any file, e.g. a PDF.
  * The file is set via dc_msg_set_file()
  * and retrieved via dc_msg_get_file().
  */
 #define DC_MSG_FILE      60
+
+
+/**
+ * Message indicating an incoming or outgoing videochat.
+ * The message was created via dc_send_videochat_invitation() on this or a remote device.
+ *
+ * Typically, such messages are rendered differently by the UIs,
+ * e.g. contain a button to join the videochat.
+ * The url for joining can be retrieved using dc_msg_get_videochat_url().
+ */
+#define DC_MSG_VIDEOCHAT_INVITATION 70
+
+/**
+ * @}
+ */
+
+
+/**
+ * @defgroup DC_SOCKET DC_SOCKET
+ *
+ * These constants configure socket security.
+ * To set socket security, use dc_set_config() with the keys "mail_security" and/or "send_security".
+ * If no socket-configuration is explicitly specified, #DC_SOCKET_AUTO is used.
+ *
+ * @addtogroup DC_SOCKET
+ * @{
+ */
+
+/**
+ * Choose socket security automatically.
+ */
+#define DC_SOCKET_AUTO 0
+
+
+/**
+ * Connect via SSL/TLS.
+ */
+#define DC_SOCKET_SSL 1
+
+
+/**
+ * Connect via STARTTLS.
+ */
+#define DC_SOCKET_STARTTLS 2
+
+
+/**
+ * Connect unencrypted, this should not be used.
+ */
+#define DC_SOCKET_PLAIN 3
 
 /**
  * @}
@@ -3983,53 +4363,10 @@ int64_t          dc_lot_get_timestamp     (const dc_lot_t* lot);
 
 
 /**
- * Connect to IMAP via STARTTLS.
- * If this flag is set, automatic configuration is skipped.
- */
-#define DC_LP_IMAP_SOCKET_STARTTLS     0x100
-
-
-/**
- * Connect to IMAP via SSL.
- * If this flag is set, automatic configuration is skipped.
- */
-#define DC_LP_IMAP_SOCKET_SSL          0x200
-
-
-/**
- * Connect to IMAP unencrypted, this should not be used.
- * If this flag is set, automatic configuration is skipped.
- */
-#define DC_LP_IMAP_SOCKET_PLAIN        0x400
-
-
-/**
- * Connect to SMTP via STARTTLS.
- * If this flag is set, automatic configuration is skipped.
- */
-#define DC_LP_SMTP_SOCKET_STARTTLS   0x10000
-
-
-/**
- * Connect to SMTP via SSL.
- * If this flag is set, automatic configuration is skipped.
- */
-#define DC_LP_SMTP_SOCKET_SSL        0x20000
-
-
-/**
- * Connect to SMTP unencrypted, this should not be used.
- * If this flag is set, automatic configuration is skipped.
- */
-#define DC_LP_SMTP_SOCKET_PLAIN      0x40000 ///<
-
-/**
  * @}
  */
 
 #define DC_LP_AUTH_FLAGS        (DC_LP_AUTH_OAUTH2|DC_LP_AUTH_NORMAL) // if none of these flags are set, the default is chosen
-#define DC_LP_IMAP_SOCKET_FLAGS (DC_LP_IMAP_SOCKET_STARTTLS|DC_LP_IMAP_SOCKET_SSL|DC_LP_IMAP_SOCKET_PLAIN) // if none of these flags are set, the default is chosen
-#define DC_LP_SMTP_SOCKET_FLAGS (DC_LP_SMTP_SOCKET_STARTTLS|DC_LP_SMTP_SOCKET_SSL|DC_LP_SMTP_SOCKET_PLAIN) // if none of these flags are set, the default is chosen
 
 /**
  * @defgroup DC_CERTCK DC_CERTCK
@@ -4066,36 +4403,166 @@ int64_t          dc_lot_get_timestamp     (const dc_lot_t* lot);
 
 
 /**
- * @defgroup DC_EMPTY DC_EMPTY
+ * @class dc_event_emitter_t
  *
- * These constants configure emptying imap folders with dc_empty_server()
+ * Opaque object that is used to get events from a single context.
+ * You can get an event emitter from a context using dc_get_event_emitter().
+ * If you are using the dc_accounts_t account manager,
+ * dc_accounts_event_emitter_t must be used instead.
+ */
+
+/**
+ * Get the next event from a context event emitter object.
  *
- * @addtogroup DC_EMPTY
- * @{
+ * @memberof dc_event_emitter_t
+ * @param emitter Event emitter object as returned from dc_get_event_emitter().
+ * @return An event as an dc_event_t object.
+ *     You can query the event for information using dc_event_get_id(), dc_event_get_data1_int() and so on;
+ *     if you are done with the event, you have to free the event using dc_event_unref().
+ *     If NULL is returned, the context belonging to the event emitter is unref'd and no more events will come;
+ *     in this case, free the event emitter using dc_event_emitter_unref().
+ */
+dc_event_t* dc_get_next_event(dc_event_emitter_t* emitter);
+
+
+/**
+ * Free a context event emitter object.
+ *
+ * @memberof dc_event_emitter_t
+ * @param emitter Event emitter object as returned from dc_get_event_emitter().
+ *     If NULL is given, nothing is done and an error is logged.
+ */
+void  dc_event_emitter_unref(dc_event_emitter_t* emitter);
+
+
+/**
+ * @class dc_accounts_event_emitter_t
+ *
+ * Opaque object that is used to get events from the dc_accounts_t account manager.
+ * You get an event emitter from the account manager using dc_accounts_get_event_emitter().
+ * If you are not using the dc_accounts_t account manager but just a single dc_context_t object,
+ * dc_event_emitter_t must be used instead.
  */
 
 /**
- * Clear all mvbox messages.
+ * Get the next event from an accounts event emitter object.
+ *
+ * @memberof dc_accounts_event_emitter_t
+ * @param emitter Event emitter object as returned from dc_accounts_get_event_emitter().
+ * @return An event as an dc_event_t object.
+ *     You can query the event for information using dc_event_get_id(), dc_event_get_data1_int() and so on;
+ *     if you are done with the event, you have to free the event using dc_event_unref().
+ *     If NULL is returned, the contexts belonging to the event emitter are unref'd and no more events will come;
+ *     in this case, free the event emitter using dc_accounts_event_emitter_unref().
  */
-#define DC_EMPTY_MVBOX 0x01
+dc_event_t* dc_accounts_get_next_event (dc_accounts_event_emitter_t* emitter);
+
 
 /**
- * Clear all INBOX messages.
+ * Free an accounts event emitter object.
+ *
+ * @memberof dc_accounts_event_emitter_t
+ * @param emitter Event emitter object as returned from dc_accounts_get_event_emitter().
+ *     If NULL is given, nothing is done and an error is logged.
  */
-#define DC_EMPTY_INBOX 0x02
+void dc_accounts_event_emitter_unref(dc_accounts_event_emitter_t* emitter);
+
 
 /**
- * @}
+ * @class dc_event_t
+ *
+ * Opaque object describing a single event.
+ * To get events, call dc_get_next_event() on an event emitter created by dc_get_event_emitter().
  */
+
+/**
+ * Get the event-id from an event object.
+ * The event-id is one of the @ref DC_EVENT constants.
+ * There may be additional data belonging to an event,
+ * to get them, use dc_event_get_data1_int(), dc_event_get_data2_int() and dc_event_get_data2_str().
+ *
+ * @memberof dc_event_t
+ * @param event Event object as returned from dc_get_next_event().
+ * @return once of the @ref DC_EVENT constants.
+ *     0 on errors.
+ */
+int dc_event_get_id(dc_event_t* event);
+
+
+/**
+ * Get a data associated with an event object.
+ * The meaning of the data depends on the event-id
+ * returned as @ref DC_EVENT constants by dc_event_get_id().
+ * See also dc_event_get_data2_int() and dc_event_get_data2_str().
+ *
+ * @memberof dc_event_t
+ * @param event Event object as returned from dc_get_next_event().
+ * @return "data1" as a signed integer, at least 32bit,
+ *     the meaning depends on the event type associated with this event.
+ */
+int dc_event_get_data1_int(dc_event_t* event);
+
+
+/**
+ * Get a data associated with an event object.
+ * The meaning of the data depends on the event-id
+ * returned as @ref DC_EVENT constants by dc_event_get_id().
+ * See also dc_event_get_data2_int() and dc_event_get_data2_str().
+ *
+ * @memberof dc_event_t
+ * @param event Event object as returned from dc_get_next_event().
+ * @return "data2" as a signed integer, at least 32bit,
+ *     the meaning depends on the event type associated with this event.
+ */
+int dc_event_get_data2_int(dc_event_t* event);
+
+
+/**
+ * Get a data associated with an event object.
+ * The meaning of the data depends on the event-id
+ * returned as @ref DC_EVENT constants by dc_event_get_id().
+ * See also dc_event_get_data1_int() and dc_event_get_data2_int().
+ *
+ * @memberof dc_event_t
+ * @param event Event object as returned from dc_get_next_event().
+ * @return "data2" as a string or NULL.
+ *     the meaning depends on the event type associated with this event.
+ *     Once you're done with the string, you have to unref it using dc_unref_str().
+ */
+char* dc_event_get_data2_str(dc_event_t* event);
+
+
+/**
+ * Get account-id this event belongs to.
+ * The account-id is of interest only when using the dc_accounts_t account manager.
+ * To get the context object belonging to the event, use dc_accounts_get_account().
+ *
+ * @memberof dc_event_t
+ * @param event Event object as returned from dc_accounts_get_next_event().
+ * @return account-id belonging to the event or 0 for errors.
+ */
+uint32_t dc_event_get_account_id(dc_event_t* event);
+
+
+/**
+ * Free memory used by an event object.
+ * If you forget to do this for an event, this will result in memory leakage.
+ *
+ * @memberof dc_event_t
+ * @param event Event object as returned from dc_get_next_event().
+ */
+void dc_event_unref(dc_event_t* event);
 
 
 /**
  * @defgroup DC_EVENT DC_EVENT
  *
- * These constants are used as events
- * reported to the callback given to dc_context_new().
- * If you do not want to handle an event, it is always safe to return 0,
- * so there is no need to add a "case" for every event.
+ * These constants are used as event-id
+ * in events returned by dc_get_next_event().
+ *
+ * Events typically come with some additional data,
+ * use dc_event_get_data1_int(), dc_event_get_data2_int() and dc_event_get_data2_str() to read this data.
+ * The meaning of the data depends on the event.
  *
  * @addtogroup DC_EVENT
  * @{
@@ -4103,14 +4570,11 @@ int64_t          dc_lot_get_timestamp     (const dc_lot_t* lot);
 
 /**
  * The library-user may write an informational string to the log.
- * Passed to the callback given to dc_context_new().
  *
  * This event should not be reported to the end-user using a popup or something like that.
  *
  * @param data1 0
- * @param data2 (const char*) Info string in english language.
- *     Must not be unref'd or modified and is valid only until the callback returns.
- * @return 0
+ * @param data2 (char*) Info string in English language.
  */
 #define DC_EVENT_INFO                     100
 
@@ -4119,9 +4583,7 @@ int64_t          dc_lot_get_timestamp     (const dc_lot_t* lot);
  * Emitted when SMTP connection is established and login was successful.
  *
  * @param data1 0
- * @param data2 (const char*) Info string in english language.
- *     Must not be unref'd or modified and is valid only until the callback returns.
- * @return 0
+ * @param data2 (char*) Info string in English language.
  */
 #define DC_EVENT_SMTP_CONNECTED           101
 
@@ -4130,9 +4592,7 @@ int64_t          dc_lot_get_timestamp     (const dc_lot_t* lot);
  * Emitted when IMAP connection is established and login was successful.
  *
  * @param data1 0
- * @param data2 (const char*) Info string in english language.
- *     Must not be unref'd or modified and is valid only until the callback returns.
- * @return 0
+ * @param data2 (char*) Info string in English language.
  */
 #define DC_EVENT_IMAP_CONNECTED           102
 
@@ -4140,9 +4600,7 @@ int64_t          dc_lot_get_timestamp     (const dc_lot_t* lot);
  * Emitted when a message was successfully sent to the SMTP server.
  *
  * @param data1 0
- * @param data2 (const char*) Info string in english language.
- *     Must not be unref'd or modified and is valid only until the callback returns.
- * @return 0
+ * @param data2 (char*) Info string in English language.
  */
 #define DC_EVENT_SMTP_MESSAGE_SENT        103
 
@@ -4150,9 +4608,7 @@ int64_t          dc_lot_get_timestamp     (const dc_lot_t* lot);
  * Emitted when a message was successfully marked as deleted on the IMAP server.
  *
  * @param data1 0
- * @param data2 (const char*) Info string in english language.
- *     Must not be unref'd or modified and is valid only until the callback returns.
- * @return 0
+ * @param data2 (char*) Info string in English language.
  */
 #define DC_EVENT_IMAP_MESSAGE_DELETED   104
 
@@ -4160,29 +4616,15 @@ int64_t          dc_lot_get_timestamp     (const dc_lot_t* lot);
  * Emitted when a message was successfully moved on IMAP.
  *
  * @param data1 0
- * @param data2 (const char*) Info string in english language.
- *     Must not be unref'd or modified and is valid only until the callback returns.
- * @return 0
+ * @param data2 (char*) Info string in English language.
  */
 #define DC_EVENT_IMAP_MESSAGE_MOVED   105
-
-/**
- * Emitted when an IMAP folder was emptied.
- *
- * @param data1 0
- * @param data2 (const char*) folder name.
- *     Must not be unref'd or modified and is valid only until the callback returns.
- * @return 0
- */
-#define DC_EVENT_IMAP_FOLDER_EMPTIED  106
 
 /**
  * Emitted when a new blob file was successfully written
  *
  * @param data1 0
- * @param data2 (const char*) path name
- *     Must not be unref'd or modified and is valid only until the callback returns.
- * @return 0
+ * @param data2 (char*) Path name
  */
 #define DC_EVENT_NEW_BLOB_FILE 150
 
@@ -4190,45 +4632,37 @@ int64_t          dc_lot_get_timestamp     (const dc_lot_t* lot);
  * Emitted when a blob file was successfully deleted
  *
  * @param data1 0
- * @param data2 (const char*) path name
- *     Must not be unref'd or modified and is valid only until the callback returns.
- * @return 0
+ * @param data2 (char*) Path name
  */
 #define DC_EVENT_DELETED_BLOB_FILE 151
 
 /**
  * The library-user should write a warning string to the log.
- * Passed to the callback given to dc_context_new().
  *
  * This event should not be reported to the end-user using a popup or something like that.
  *
  * @param data1 0
- * @param data2 (const char*) Warning string in english language.
- *     Must not be unref'd or modified and is valid only until the callback returns.
- * @return 0
+ * @param data2 (char*) Warning string in English language.
  */
 #define DC_EVENT_WARNING                  300
 
 
 /**
  * The library-user should report an error to the end-user.
- * Passed to the callback given to dc_context_new().
  *
  * As most things are asynchronous, things may go wrong at any time and the user
  * should not be disturbed by a dialog or so.  Instead, use a bubble or so.
  *
- * However, for ongoing processes (eg. dc_configure())
- * or for functions that are expected to fail (eg. dc_continue_key_transfer())
+ * However, for ongoing processes (e.g. dc_configure())
+ * or for functions that are expected to fail (e.g. dc_continue_key_transfer())
  * it might be better to delay showing these events until the function has really
  * failed (returned false). It should be sufficient to report only the _last_ error
- * in a messasge box then.
+ * in a message box then.
  *
  * @param data1 0
- * @param data2 (const char*) Error string, always set, never NULL.
+ * @param data2 (char*) Error string, always set, never NULL.
  *     Some error strings are taken from dc_set_stock_translation(),
- *     however, most error strings will be in english language.
- *     Must not be unref'd or modified and is valid only until the callback returns.
- * @return 0
+ *     however, most error strings will be in English language.
  */
 #define DC_EVENT_ERROR                    400
 
@@ -4242,33 +4676,26 @@ int64_t          dc_lot_get_timestamp     (const dc_lot_t* lot);
  * Network errors should be reported to users in a non-disturbing way,
  * however, as network errors may come in a sequence,
  * it is not useful to raise each an every error to the user.
- * For this purpose, data1 is set to 1 if the error is probably worth reporting.
  *
  * Moreover, if the UI detects that the device is offline,
  * it is probably more useful to report this to the user
  * instead of the string from data2.
  *
- * @param data1 (int) 1=first/new network error, should be reported the user;
- *     0=subsequent network error, should be logged only
- * @param data2 (const char*) Error string, always set, never NULL.
- *     Must not be unref'd or modified and is valid only until the callback returns.
- * @return 0
+ * @param data1 0
+ * @param data2 (char*) Error string, always set, never NULL.
  */
 #define DC_EVENT_ERROR_NETWORK            401
 
 
 /**
  * An action cannot be performed because the user is not in the group.
- * Reported eg. after a call to
+ * Reported e.g. after a call to
  * dc_set_chat_name(), dc_set_chat_profile_image(),
  * dc_add_contact_to_chat(), dc_remove_contact_from_chat(),
  * dc_send_text_msg() or another sending function.
  *
  * @param data1 0
- * @param data2 (const char*) Info string in english language.
- *     Must not be unref'd or modified
- *     and is valid only until the callback returns.
- * @return 0
+ * @param data2 (char*) Info string in English language.
  */
 #define DC_EVENT_ERROR_SELF_NOT_IN_GROUP  410
 
@@ -4282,7 +4709,6 @@ int64_t          dc_lot_get_timestamp     (const dc_lot_t* lot);
  *
  * @param data1 (int) chat_id for single added messages
  * @param data2 (int) msg_id for single added messages
- * @return 0
  */
 #define DC_EVENT_MSGS_CHANGED             2000
 
@@ -4295,9 +4721,23 @@ int64_t          dc_lot_get_timestamp     (const dc_lot_t* lot);
  *
  * @param data1 (int) chat_id
  * @param data2 (int) msg_id
- * @return 0
  */
 #define DC_EVENT_INCOMING_MSG             2005
+
+
+/**
+ * Messages were marked noticed or seen.
+ * The UI may update badge counters or stop showing a chatlist-item with a bold font.
+ *
+ * This event is emitted e.g. when calling dc_markseen_msgs(), dc_marknoticed_chat() or dc_marknoticed_contact()
+ * or when a chat is answered on another device.
+ * Do not try to derive the state of an item from just the fact you received the event;
+ * use e.g. dc_msg_get_state() or dc_get_fresh_msg_cnt() for this purpose.
+ *
+ * @param data1 (int) chat_id
+ * @param data2 0
+ */
+#define DC_EVENT_MSGS_NOTICED             2008
 
 
 /**
@@ -4306,18 +4746,17 @@ int64_t          dc_lot_get_timestamp     (const dc_lot_t* lot);
  *
  * @param data1 (int) chat_id
  * @param data2 (int) msg_id
- * @return 0
  */
 #define DC_EVENT_MSG_DELIVERED            2010
 
 
 /**
- * A single message could not be sent. State changed from DC_STATE_OUT_PENDING or DC_STATE_OUT_DELIVERED to
- * DC_STATE_OUT_FAILED, see dc_msg_get_state().
+ * A single message could not be sent.
+ * State changed from DC_STATE_OUT_PENDING, DC_STATE_OUT_DELIVERED or DC_STATE_OUT_MDN_RCVD
+ * to DC_STATE_OUT_FAILED, see dc_msg_get_state().
  *
  * @param data1 (int) chat_id
  * @param data2 (int) msg_id
- * @return 0
  */
 #define DC_EVENT_MSG_FAILED               2012
 
@@ -4328,7 +4767,6 @@ int64_t          dc_lot_get_timestamp     (const dc_lot_t* lot);
  *
  * @param data1 (int) chat_id
  * @param data2 (int) msg_id
- * @return 0
  */
 #define DC_EVENT_MSG_READ                 2015
 
@@ -4341,17 +4779,20 @@ int64_t          dc_lot_get_timestamp     (const dc_lot_t* lot);
  *
  * @param data1 (int) chat_id
  * @param data2 0
- * @return 0
  */
 #define DC_EVENT_CHAT_MODIFIED            2020
 
+/**
+ * Chat ephemeral timer changed.
+ */
+#define DC_EVENT_CHAT_EPHEMERAL_TIMER_MODIFIED 2021
+
 
 /**
- * Contact(s) created, renamed, blocked or deleted.
+ * Contact(s) created, renamed, verified, blocked or deleted.
  *
- * @param data1 (int) If not 0, this is the contact_id of an added contact that should be selected.
+ * @param data1 (int) contact_id of the changed contact or 0 on batch-changes or deletion.
  * @param data2 0
- * @return 0
  */
 #define DC_EVENT_CONTACTS_CHANGED         2030
 
@@ -4362,9 +4803,8 @@ int64_t          dc_lot_get_timestamp     (const dc_lot_t* lot);
  *
  * @param data1 (int) contact_id of the contact for which the location has changed.
  *     If the locations of several contacts have been changed,
- *     eg. after calling dc_delete_all_locations(), this parameter is set to 0.
+ *     e.g. after calling dc_delete_all_locations(), this parameter is set to 0.
  * @param data2 0
- * @return 0
  */
 #define DC_EVENT_LOCATION_CHANGED         2035
 
@@ -4373,8 +4813,7 @@ int64_t          dc_lot_get_timestamp     (const dc_lot_t* lot);
  * Inform about the configuration progress started by dc_configure().
  *
  * @param data1 (int) 0=error, 1-999=progress in permille, 1000=success and done
- * @param data2 0
- * @return 0
+ * @param data2 (char*) progress comment, error message or NULL if not applicable
  */
 #define DC_EVENT_CONFIGURE_PROGRESS       2041
 
@@ -4384,7 +4823,6 @@ int64_t          dc_lot_get_timestamp     (const dc_lot_t* lot);
  *
  * @param data1 (int) 0=error, 1-999=progress in permille, 1000=success and done
  * @param data2 0
- * @return 0
  */
 #define DC_EVENT_IMEX_PROGRESS            2051
 
@@ -4396,10 +4834,8 @@ int64_t          dc_lot_get_timestamp     (const dc_lot_t* lot);
  * A typical purpose for a handler of this event may be to make the file public to some system
  * services.
  *
- * @param data1 (const char*) Path and file name.
- *     Must not be unref'd or modified and is valid only until the callback returns.
- * @param data2 0
- * @return 0
+ * @param data1 0
+ * @param data2 (char*) Path and file name.
  */
 #define DC_EVENT_IMEX_FILE_WRITTEN        2052
 
@@ -4417,7 +4853,6 @@ int64_t          dc_lot_get_timestamp     (const dc_lot_t* lot);
  *     600=vg-/vc-request-with-auth received, vg-member-added/vc-contact-confirm sent, typically shown as "bob@addr verified".
  *     800=vg-member-added-received received, shown as "bob@addr securely joined GROUP", only sent for the verified-group-protocol.
  *     1000=Protocol finished for this contact.
- * @return 0
  */
 #define DC_EVENT_SECUREJOIN_INVITER_PROGRESS      2060
 
@@ -4433,38 +4868,16 @@ int64_t          dc_lot_get_timestamp     (const dc_lot_t* lot);
  * @param data2 (int) Progress as:
  *     400=vg-/vc-request-with-auth sent, typically shown as "alice@addr verified, introducing myself."
  *     (Bob has verified alice and waits until Alice does the same for him)
- * @return 0
  */
 #define DC_EVENT_SECUREJOIN_JOINER_PROGRESS       2061
-
-
-/**
- * This event is sent out to the inviter when a joiner successfully joined a group.
- *
- * @param data1 (int) chat_id
- * @param data2 (int) contact_id
- * @return 0
- */
-#define DC_EVENT_SECUREJOIN_MEMBER_ADDED 2062
-
 
 /**
  * @}
  */
 
 
-#define DC_EVENT_FILE_COPIED         2055 // not used anymore
-#define DC_EVENT_IS_OFFLINE          2081 // not used anymore
-#define DC_EVENT_GET_STRING          2091 // not used anymore, use dc_set_stock_translation()
-#define DC_ERROR_SEE_STRING          0    // not used anymore
-#define DC_ERROR_SELF_NOT_IN_GROUP   1    // not used anymore
-#define DC_STR_SELFNOTINGRP          21   // not used anymore
-#define DC_EVENT_DATA1_IS_STRING(e)  ((e)==DC_EVENT_IMEX_FILE_WRITTEN || (e)==DC_EVENT_FILE_COPIED)
-#define DC_EVENT_DATA2_IS_STRING(e)  ((e)>=100 && (e)<=499)
-#define DC_EVENT_RETURNS_INT(e)      ((e)==DC_EVENT_IS_OFFLINE) // not used anymore
-#define DC_EVENT_RETURNS_STRING(e)   ((e)==DC_EVENT_GET_STRING) // not used anymore
-char*           dc_get_version_str           (void); // deprecated
-void            dc_array_add_id              (dc_array_t*, uint32_t); // deprecated
+#define DC_EVENT_DATA1_IS_STRING(e)  0    // not used anymore 
+#define DC_EVENT_DATA2_IS_STRING(e)  ((e)==DC_EVENT_CONFIGURE_PROGRESS || (e)==DC_EVENT_IMEX_FILE_WRITTEN || ((e)>=100 && (e)<=499))
 
 
 /*
@@ -4473,6 +4886,21 @@ void            dc_array_add_id              (dc_array_t*, uint32_t); // depreca
 #define DC_SHOW_EMAILS_OFF               0
 #define DC_SHOW_EMAILS_ACCEPTED_CONTACTS 1
 #define DC_SHOW_EMAILS_ALL               2
+
+
+/*
+ * Values for dc_get|set_config("media_quality")
+ */
+#define DC_MEDIA_QUALITY_BALANCED 0
+#define DC_MEDIA_QUALITY_WORSE    1
+
+
+/*
+ * Values for dc_get|set_config("key_gen_type")
+ */
+#define DC_KEY_GEN_DEFAULT 0
+#define DC_KEY_GEN_RSA2048 1
+#define DC_KEY_GEN_ED25519 2
 
 
 /**
@@ -4485,23 +4913,43 @@ void            dc_array_add_id              (dc_array_t*, uint32_t); // depreca
  */
 
 /**
- * Provider status returned by dc_provider_get_status().
+ * Provider works out-of-the-box.
+ * This provider status is returned for provider where the login
+ * works by just entering the name or the email-address.
  *
- * Works right out of the box without any preperation steps needed
+ * - There is no need for the user to do any special things
+ *   (enable IMAP or so) in the provider's web interface or at other places.
+ * - There is no need for the user to enter advanced settings;
+ *   server, port etc. are known by the core.
+ *
+ * The status is returned by dc_provider_get_status().
  */
 #define         DC_PROVIDER_STATUS_OK           1
 
 /**
- * Provider status returned by dc_provider_get_status().
+ * Provider works, but there are preparations needed.
  *
- * Works, but preparation steps are needed
+ * - The user has to do some special things as "Enable IMAP in the web interface",
+ *   what exactly, is described in the string returned by dc_provider_get_before_login_hints()
+ *   and, typically more detailed, in the page linked by dc_provider_get_overview_page().
+ * - There is no need for the user to enter advanced settings;
+ *   server, port etc. should be known by the core.
+ *
+ * The status is returned by dc_provider_get_status().
  */
 #define         DC_PROVIDER_STATUS_PREPARATION  2
 
 /**
- * Provider status returned by dc_provider_get_status().
+ * Provider is not working.
+ * This provider status is returned for providers
+ * that are known to not work with Delta Chat.
+ * The UI should block logging in with this provider.
  *
- * Doesn't work (too unstable to use falls also in this category)
+ * More information about that is typically provided
+ * in the string returned by dc_provider_get_before_login_hints()
+ * and in the page linked by dc_provider_get_overview_page().
+ *
+ * The status is returned by dc_provider_get_status().
  */
 #define         DC_PROVIDER_STATUS_BROKEN       3
 
@@ -4510,67 +4958,463 @@ void            dc_array_add_id              (dc_array_t*, uint32_t); // depreca
  */
 
 
-/*
- * TODO: Strings need some doumentation about used placeholders.
+/**
+ * @defgroup DC_CHAT_VISIBILITY DC_CHAT_VISIBILITY
  *
+ * These constants describe the visibility of a chat.
+ * The chat visibility can be get using dc_chat_get_visibility()
+ * and set using dc_set_chat_visibility().
+ *
+ * @addtogroup DC_CHAT_VISIBILITY
+ * @{
+ */
+
+/**
+ * Chats with normal visibility are not archived and are shown below all pinned chats.
+ * Archived chats, that receive new messages automatically become normal chats.
+ */
+#define         DC_CHAT_VISIBILITY_NORMAL      0
+
+/**
+ * Archived chats are not included in the default chatlist returned by dc_get_chatlist().
+ * Instead, if there are _any_ archived chats, the pseudo-chat
+ * with the chat_id DC_CHAT_ID_ARCHIVED_LINK will be added at the end of the chatlist.
+ *
+ * The UI typically shows a little icon or chats beside archived chats in the chatlist,
+ * this is needed as e.g. the search will also return archived chats.
+ *
+ * If archived chats receive new messages, they become normal chats again.
+ *
+ * To get a list of archived chats, use dc_get_chatlist() with the flag DC_GCL_ARCHIVED_ONLY.
+ */
+#define         DC_CHAT_VISIBILITY_ARCHIVED    1
+
+/**
+ * Pinned chats are included in the default chatlist. moreover,
+ * they are always the first items, whether they have fresh messages or not.
+ */
+#define         DC_CHAT_VISIBILITY_PINNED      2
+
+/**
+ * @}
+ */
+
+
+/**
  * @defgroup DC_STR DC_STR
  *
- * These constants are used to request strings using #DC_EVENT_GET_STRING.
+ * These constants are used to define strings using dc_set_stock_translation().
+ * This allows localisation of the texts used by the core,
+ * you have to call dc_set_stock_translation()
+ * for every @ref DC_STR string you want to translate.
+ *
+ * Some strings contain some placeholders as `%1$s` or `%2$s` -
+ * these will be replaced by some content defined in the @ref DC_STR description below.
+ * As a synonym for `%1$s` you can also use `%1$d` or `%1$@`; same for `%2$s`.
+ *
+ * If you do not call dc_set_stock_translation() for a concrete @ref DC_STR constant,
+ * a default string will be used.
  *
  * @addtogroup DC_STR
  * @{
  */
-#define DC_STR_NOMESSAGES                 1
-#define DC_STR_SELF                       2
-#define DC_STR_DRAFT                      3
-#define DC_STR_MEMBER                     4
-#define DC_STR_CONTACT                    6
-#define DC_STR_VOICEMESSAGE               7
-#define DC_STR_DEADDROP                   8
-#define DC_STR_IMAGE                      9
-#define DC_STR_VIDEO                      10
-#define DC_STR_AUDIO                      11
-#define DC_STR_FILE                       12
-#define DC_STR_STATUSLINE                 13
-#define DC_STR_NEWGROUPDRAFT              14
-#define DC_STR_MSGGRPNAME                 15
-#define DC_STR_MSGGRPIMGCHANGED           16
-#define DC_STR_MSGADDMEMBER               17
-#define DC_STR_MSGDELMEMBER               18
-#define DC_STR_MSGGROUPLEFT               19
-#define DC_STR_GIF                        23
-#define DC_STR_ENCRYPTEDMSG               24
-#define DC_STR_E2E_AVAILABLE              25
-#define DC_STR_ENCR_TRANSP                27
-#define DC_STR_ENCR_NONE                  28
-#define DC_STR_CANTDECRYPT_MSG_BODY       29
-#define DC_STR_FINGERPRINTS               30
-#define DC_STR_READRCPT                   31
-#define DC_STR_READRCPT_MAILBODY          32
-#define DC_STR_MSGGRPIMGDELETED           33
-#define DC_STR_E2E_PREFERRED              34
-#define DC_STR_CONTACT_VERIFIED           35
-#define DC_STR_CONTACT_NOT_VERIFIED       36
-#define DC_STR_CONTACT_SETUP_CHANGED      37
-#define DC_STR_ARCHIVEDCHATS              40
-#define DC_STR_STARREDMSGS                41
-#define DC_STR_AC_SETUP_MSG_SUBJECT       42
-#define DC_STR_AC_SETUP_MSG_BODY          43
-#define DC_STR_SELFTALK_SUBTITLE          50
-#define DC_STR_CANNOT_LOGIN               60
-#define DC_STR_SERVER_RESPONSE            61
-#define DC_STR_MSGACTIONBYUSER            62
-#define DC_STR_MSGACTIONBYME              63
-#define DC_STR_MSGLOCATIONENABLED         64
-#define DC_STR_MSGLOCATIONDISABLED        65
-#define DC_STR_LOCATION                   66
-#define DC_STR_STICKER                    67
-#define DC_STR_DEVICE_MESSAGES            68
-#define DC_STR_COUNT                      68
 
-/*
+/// "No messages."
+///
+/// Used in summaries.
+#define DC_STR_NOMESSAGES                 1
+
+/// "Me"
+///
+/// Used as the sender name for oneself.
+#define DC_STR_SELF                       2
+
+/// "Draft"
+///
+/// Used in summaries.
+#define DC_STR_DRAFT                      3
+
+/// "Voice message"
+///
+/// Used in summaries.
+#define DC_STR_VOICEMESSAGE               7
+
+/// "Contact requests"
+///
+/// Used as the name for the corresponding chat.
+#define DC_STR_DEADDROP                   8
+
+/// "Image"
+///
+/// Used in summaries.
+#define DC_STR_IMAGE                      9
+
+/// "Video"
+///
+/// Used in summaries.
+#define DC_STR_VIDEO                      10
+
+/// "Audio"
+///
+/// Used in summaries.
+#define DC_STR_AUDIO                      11
+
+/// "File"
+///
+/// Used in summaries.
+#define DC_STR_FILE                       12
+
+/// "Sent with my Delta Chat Messenger: https://delta.chat"
+///
+/// Used as the default footer
+/// if nothing else is set by the dc_set_config()-option `selfstatus`.
+#define DC_STR_STATUSLINE                 13
+
+/// "Hi, i've created the group %1$s for us."
+///
+/// Used as a draft text after group creation.
+/// - %1$s will be replaced by the group name
+#define DC_STR_NEWGROUPDRAFT              14
+
+/// "Group name changed from %1$s to %2$s."
+///
+/// Used in status messages for group name changes.
+/// - %1$s will be replaced by the old group name
+/// - %2$s will be replaced by the new group name
+#define DC_STR_MSGGRPNAME                 15
+
+/// "Group image changed."
+///
+/// Used in status messages for group images changes.
+#define DC_STR_MSGGRPIMGCHANGED           16
+
+/// "Member %1$s added."
+///
+/// Used in status messages for added members.
+/// - %1$s will be replaced by the name of the added member
+#define DC_STR_MSGADDMEMBER               17
+
+/// "Member %1$s removed."
+///
+/// Used in status messages for removed members.
+/// - %1$s will be replaced by the name of the removed member
+#define DC_STR_MSGDELMEMBER               18
+
+/// "Group left."
+///
+/// Used in status messages.
+#define DC_STR_MSGGROUPLEFT               19
+
+/// "GIF"
+///
+/// Used in summaries.
+#define DC_STR_GIF                        23
+
+/// "Encrypted message"
+///
+/// Used in subjects of outgoing messages.
+#define DC_STR_ENCRYPTEDMSG               24
+
+/// "End-to-end encryption available."
+///
+/// Used to build the string returned by dc_get_contact_encrinfo().
+#define DC_STR_E2E_AVAILABLE              25
+
+/// "Transport-encryption."
+///
+/// Used to build the string returned by dc_get_contact_encrinfo().
+#define DC_STR_ENCR_TRANSP                27
+
+/// "No encryption."
+///
+/// Used to build the string returned by dc_get_contact_encrinfo().
+#define DC_STR_ENCR_NONE                  28
+
+/// "This message was encrypted for another setup."
+///
+/// Used as message text if decryption fails.
+#define DC_STR_CANTDECRYPT_MSG_BODY       29
+
+/// "Fingerprints"
+///
+/// Used to build the string returned by dc_get_contact_encrinfo().
+#define DC_STR_FINGERPRINTS               30
+
+/// "Message opened"
+///
+/// Used in subjects of outgoing read receipts.
+#define DC_STR_READRCPT                   31
+
+/// "The message '%1$s' you sent was displayed on the screen of the recipient."
+///
+/// Used as message text of outgoing read receipts.
+/// - %1$s will be replaced by the subject of the displayed message
+#define DC_STR_READRCPT_MAILBODY          32
+
+/// "Group image deleted."
+///
+/// Used in status messages for deleted group images.
+#define DC_STR_MSGGRPIMGDELETED           33
+
+/// "End-to-end encryption preferred."
+///
+/// Used to build the string returned by dc_get_contact_encrinfo().
+#define DC_STR_E2E_PREFERRED              34
+
+/// "%1$s verified"
+///
+/// Used in status messages.
+/// - %1$s will be replaced by the name of the verified contact
+#define DC_STR_CONTACT_VERIFIED           35
+
+/// "Cannot verify %1$s."
+///
+/// Used in status messages.
+/// - %1$s will be replaced by the name of the contact that cannot be verified
+#define DC_STR_CONTACT_NOT_VERIFIED       36
+
+/// "Changed setup for %1$s."
+///
+/// Used in status messages.
+/// - %1$s will be replaced by the name of the contact with the changed setup
+#define DC_STR_CONTACT_SETUP_CHANGED      37
+
+/// "Archived chats"
+///
+/// Used as the name for the corresponding chatlist entry.
+#define DC_STR_ARCHIVEDCHATS              40
+
+/// "Autocrypt Setup Message"
+///
+/// Used in subjects of outgoing Autocrypt Setup Messages.
+#define DC_STR_AC_SETUP_MSG_SUBJECT       42
+
+/// "This is the Autocrypt Setup Message, open it in a compatible client to use your setup"
+///
+/// Used as message text of outgoing Autocrypt Setup Messages.
+#define DC_STR_AC_SETUP_MSG_BODY          43
+
+/// "Cannot login as %1$s."
+///
+/// Used in error strings.
+/// - %1$s will be replaced by the failing login name
+#define DC_STR_CANNOT_LOGIN               60
+
+/// "Could not connect to %1$s: %2$s"
+///
+/// Used in error strings.
+/// - %1$s will be replaced by the failing server
+/// - %2$s by a the error message as returned from the server
+#define DC_STR_SERVER_RESPONSE            61
+
+/// "%1$s by %2$s"
+///
+/// Used to concretize actions,
+/// - %1$s will be replaced by an action
+///   as #DC_STR_MSGADDMEMBER or #DC_STR_MSGGRPIMGCHANGED (full-stop removed, if any)
+/// - %2$s will be replaced by the name of the user taking that action
+#define DC_STR_MSGACTIONBYUSER            62
+
+/// "%1$s by me"
+///
+/// Used to concretize actions.
+/// - %1$s will be replaced by an action
+///   as #DC_STR_MSGADDMEMBER or #DC_STR_MSGGRPIMGCHANGED (full-stop removed, if any)
+#define DC_STR_MSGACTIONBYME              63
+
+/// "Location streaming enabled."
+///
+/// Used in status messages.
+#define DC_STR_MSGLOCATIONENABLED         64
+
+/// "Location streaming disabled."
+///
+/// Used in status messages.
+#define DC_STR_MSGLOCATIONDISABLED        65
+
+/// "Location"
+///
+/// Used in summaries.
+#define DC_STR_LOCATION                   66
+
+/// "Sticker"
+///
+/// Used in summaries.
+#define DC_STR_STICKER                    67
+
+/// "Device messages"
+///
+/// Used as the name for the corresponding chat.
+#define DC_STR_DEVICE_MESSAGES            68
+
+/// "Saved messages"
+///
+/// Used as the name for the corresponding chat.
+#define DC_STR_SAVED_MESSAGES             69
+
+/// "Messages in this chat are generated locally by your Delta Chat app."
+///
+/// Used as message text for the message added to a newly created device chat.
+#define DC_STR_DEVICE_MESSAGES_HINT       70
+
+/// "Welcome to Delta Chat! Delta Chat looks and feels like other popular messenger apps ..."
+///
+/// Used as message text for the message added to the device chat after successful login.
+#define DC_STR_WELCOME_MESSAGE            71
+
+/// "Unknown sender for this chat. See 'info' for more details."
+///
+/// Use as message text if assigning the message to a chat is not totally correct.
+#define DC_STR_UNKNOWN_SENDER_FOR_CHAT    72
+
+/// "Message from %1$s"
+///
+/// Used in subjects of outgoing messages in one-to-one chats.
+/// - %1$s will be replaced by the name of the sender,
+///   this is the dc_set_config()-option `displayname` or `addr`
+#define DC_STR_SUBJECT_FOR_NEW_CONTACT    73
+
+/// "Failed to send message to %1$s."
+///
+/// Used in status messages.
+/// - %1$s will be replaced by the name of the contact the message cannot be sent to
+#define DC_STR_FAILED_SENDING_TO          74
+
+/// "Message deletion timer is disabled."
+///
+/// Used in status messages.
+#define DC_STR_EPHEMERAL_DISABLED         75
+
+/// "Message deletion timer is set to %1$s s."
+///
+/// Used in status messages when the other constants
+/// (#DC_STR_EPHEMERAL_MINUTE, #DC_STR_EPHEMERAL_HOUR and so on) do not match the timer.
+/// - %1$s will be replaced by the number of seconds the timer is set to
+#define DC_STR_EPHEMERAL_SECONDS          76
+
+/// "Message deletion timer is set to 1 minute."
+///
+/// Used in status messages.
+#define DC_STR_EPHEMERAL_MINUTE           77
+
+/// "Message deletion timer is set to 1 hour."
+///
+/// Used in status messages.
+#define DC_STR_EPHEMERAL_HOUR             78
+
+/// "Message deletion timer is set to 1 day."
+///
+/// Used in status messages.
+#define DC_STR_EPHEMERAL_DAY              79
+
+/// "Message deletion timer is set to 1 week."
+///
+/// Used in status messages.
+#define DC_STR_EPHEMERAL_WEEK             80
+
+/// DEPRECATED
+///
+/// DC_STR_EPHEMERAL_WEEKS is used instead.
+#define DC_STR_EPHEMERAL_FOUR_WEEKS       81
+
+/// "Video chat invitation"
+///
+/// Used in summaries.
+#define DC_STR_VIDEOCHAT_INVITATION       82
+
+/// "You are invited to a video chat, click %1$s to join."
+///
+/// Used as message text of outgoing video chat invitations.
+/// - %1$s will be replaced by the URL of the video chat
+#define DC_STR_VIDEOCHAT_INVITE_MSG_BODY  83
+
+/// "Error: %1$s"
+///
+/// Used in error strings.
+/// - %1$s will be replaced by the concrete error
+#define DC_STR_CONFIGURATION_FAILED       84
+
+/// "Date or time of your device seem to be inaccurate (%1$s). Adjust your clock to ensure your messages are received correctly"
+///
+/// Used as device message if a wrong date or time was detected.
+/// - %1$s will be replaced by a date/time string as YY-mm-dd HH:MM:SS
+#define DC_STR_BAD_TIME_MSG_BODY          85
+
+/// "Your Delta Chat version might be outdated, check https://get.delta.chat for updates."
+///
+/// Used as device message if the used version is probably outdated.
+#define DC_STR_UPDATE_REMINDER_MSG_BODY   86
+
+/// "No network."
+///
+/// Used in error strings.
+#define DC_STR_ERROR_NO_NETWORK           87
+
+/// "Chat protection enabled."
+///
+/// Used in status messages.
+#define DC_STR_PROTECTION_ENABLED         88
+
+/// "Chat protection disabled."
+///
+/// Used in status messages.
+#define DC_STR_PROTECTION_DISABLED        89
+
+/// "Reply"
+///
+/// Used in summaries.
+/// Note: the string has to be a noun, not a verb (not: "to reply").
+#define DC_STR_REPLY_NOUN                 90
+
+/// "You deleted the 'Saved messages' chat..."
+///
+/// Used as device message text.
+#define DC_STR_SELF_DELETED_MSG_BODY      91
+
+/// "'Delete messages from server' turned off as now all folders are affected."
+///
+/// Used as device message text.
+#define DC_STR_SERVER_TURNED_OFF          92
+
+/// "Message deletion timer is set to %1$s minutes."
+///
+/// Used in status messages.
+//
+/// `%1$s` will be replaced by the number of minutes (alwasy >1) the timer is set to.
+#define DC_STR_EPHEMERAL_MINUTES          93
+
+/// "Message deletion timer is set to %1$s hours."
+///
+/// Used in status messages.
+//
+/// `%1$s` will be replaced by the number of hours (always >1) the timer is set to.
+#define DC_STR_EPHEMERAL_HOURS            94
+
+/// "Message deletion timer is set to %1$s days."
+///
+/// Used in status messages.
+//
+/// `%1$s` will be replaced by the number of days (always >1) the timer is set to.
+#define DC_STR_EPHEMERAL_DAYS             95
+
+/// "Message deletion timer is set to %1$s weeks."
+///
+/// Used in status messages.
+//
+/// `%1$s` will be replaced by the number of weeks (always >1) the timer is set to.
+#define DC_STR_EPHEMERAL_WEEKS            96
+
+/**
  * @}
  */
+
+
+#ifdef PY_CFFI_INC
+/* Helper utility to locate the header file when building python bindings. */
+char* _dc_header_file_location(void) {
+    return __FILE__;
+}
+#endif
 
 
 #ifdef __cplusplus

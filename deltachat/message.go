@@ -120,10 +120,6 @@ func (m *Message) IsSetupMessage() bool {
 	return int(C.dc_msg_is_setupmessage(m.msg)) > 0
 }
 
-func (m *Message) IsStarred() bool {
-	return int(C.dc_msg_is_starred(m.msg)) > 0
-}
-
 func (m *Message) LateFilingMediaSize(width int, height int, duration int) {
 	C.dc_msg_latefiling_mediasize(m.msg, C.int(width), C.int(height), C.int(duration))
 }

@@ -15,10 +15,6 @@ func (c *Chat) CanSent() bool {
 	return int(C.dc_chat_can_send(c.chat)) > 0
 }
 
-func (c *Chat) GetArchived() int {
-	return int(C.dc_chat_get_archived(c.chat))
-}
-
 func (c *Chat) GetColor() uint32 {
 	return uint32(C.dc_chat_get_color(c.chat))
 }
@@ -55,8 +51,8 @@ func (c *Chat) IsUnpromoted() bool {
 	return int(C.dc_chat_is_unpromoted(c.chat)) > 0
 }
 
-func (c *Chat) IsVerified() bool {
-	return int(C.dc_chat_is_verified(c.chat)) > 0
+func (c *Chat) IsProtected() bool {
+	return int(C.dc_chat_is_protected(c.chat)) > 0
 }
 
 func (c *Chat) Unref() {

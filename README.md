@@ -8,7 +8,7 @@ to abstract away as much memory management as possible.
 ## Installation
 
 ```bash
-go get github.com/hugot/go-deltachat/deltachat
+go get github.com/deltachat/go-deltachat/deltachat
 ```
 
 ## Current version of libdeltachat
@@ -33,7 +33,7 @@ import (
 	"os"
 	"os/signal"
 
-	"github.com/hugot/go-deltachat/deltachat"
+	"github.com/deltachat/go-deltachat/deltachat"
 )
 
 func main() {
@@ -52,12 +52,12 @@ func main() {
 
 	// Handler for info logs from libdeltachat
 	client.On(deltachat.DC_EVENT_INFO, func(c *deltachat.Context, e *deltachat.Event) {
-		info, _ := e.Data2.String()
+		info := e.GetData2String()
 
 		log.Println(*info)
 	})
 
-	client.Open("/var/lib/deltabot/stuff.db")
+	client.Open("stuff.db")
 
 
 	// Bear in mind that the config parameters are stored in the sqlite database
@@ -79,12 +79,7 @@ func main() {
 
 		client.SetConfig(
 			"server_flags",
-			fmt.Sprintf(
-				"%d",
-				deltachat.DC_LP_AUTH_NORMAL|
-					deltachat.DC_LP_IMAP_SOCKET_SSL|
-					deltachat.DC_LP_SMTP_SOCKET_STARTTLS,
-			),
+			fmt.Sprintf("%d", deltachat.DC_LP_AUTH_NORMAL),
 		)
 
 		client.Configure()

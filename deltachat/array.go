@@ -40,12 +40,6 @@ func (a *Array) GetMessageID(index uint) uint32 {
 	return uint32(C.dc_array_get_msg_id(a.array, C.size_t(index)))
 }
 
-// Returns a pointer to the raw C array data. intentionally not exposed outside of this
-// library.
-func (a *Array) getRaw() *C.uint32_t {
-	return C.dc_array_get_raw(a.array)
-}
-
 func (a *Array) GetTimestamp(index uint) int64 {
 	return int64(C.dc_array_get_timestamp(a.array, C.size_t(index)))
 }
