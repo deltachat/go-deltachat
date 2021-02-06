@@ -7,7 +7,7 @@ package deltachat
 import "C"
 
 import (
-        "runtime"
+	"runtime"
 )
 
 func NewContext(dbLocation string) *Context {
@@ -41,11 +41,11 @@ func (c *Context) Configure() {
 func (c *Context) GetEventEmitter() EventEmitter {
 	cEmitter := C.dc_get_event_emitter(c.context)
 
-        e := EventEmitter{
+	e := EventEmitter{
 		emitter: cEmitter,
 	}
-        runtime.SetFinalizer(&e, (*EventEmitter).Free)
-        return e
+	runtime.SetFinalizer(&e, (*EventEmitter).Free)
+	return e
 }
 
 func (c *Context) CreateChatByContactID(ID uint32) uint32 {

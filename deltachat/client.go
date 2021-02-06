@@ -122,16 +122,16 @@ func (c *Client) Open(dbLocation string) {
 
 	c.context = context
 
-        go func() {
-                emitter := c.context.GetEventEmitter()
-                for {
-                        event := emitter.GetNextEvent()
-                        if event == nil {
-                                break
-                        }
-                        c.eventChan <- event
-                }
-        }()
+	go func() {
+		emitter := c.context.GetEventEmitter()
+		for {
+			event := emitter.GetNextEvent()
+			if event == nil {
+				break
+			}
+			c.eventChan <- event
+		}
+	}()
 }
 
 func (c *Client) Configure() {

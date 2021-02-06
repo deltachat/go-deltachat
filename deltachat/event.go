@@ -46,20 +46,24 @@ var dataTypeNames = map[uint8]string{
 }
 
 func (e *Event) GetId() int {
-        return int(C.dc_event_get_id(e.event))
+	return int(C.dc_event_get_id(e.event))
 }
 
 func (e *Event) GetData1Int() int {
-        return int(C.dc_event_get_data1_int(e.event))
+	return int(C.dc_event_get_data1_int(e.event))
 }
 
 func (e *Event) GetData2String() *string {
-        s := C.dc_event_get_data2_str(e.event)
-        if s != nil {
-                res := C.GoString(s)
-                C.dc_str_unref(s)
-                return &res
-        } else {
-                return nil
-        }
+	s := C.dc_event_get_data2_str(e.event)
+	if s != nil {
+		res := C.GoString(s)
+		C.dc_str_unref(s)
+		return &res
+	} else {
+		return nil
+	}
+}
+
+func (e *Event) Free() {
+	C.dc_event_unref(e.event)
 }
