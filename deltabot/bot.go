@@ -4,7 +4,7 @@ import (
 	"log"
 	"os"
 
-	"github.com/hugot/go-deltachat/deltachat"
+	"github.com/deltachat/go-deltachat/deltachat"
 )
 
 type Bot struct {

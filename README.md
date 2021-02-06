@@ -11,10 +11,6 @@ to abstract away as much memory management as possible.
 go get github.com/deltachat/go-deltachat/deltachat
 ```
 
-## Current version of libdeltachat
-The libdeltachat binary that is distributed with go-deltachat is the C FFI to:
-
-`deltachat v1.0.0-beta.22`
 
 ## Usage example
 This library wraps the entire FFI API that deltachat has to offer and can of course be

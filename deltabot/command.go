@@ -1,6 +1,6 @@
 package deltabot
 
-import "github.com/hugot/go-deltachat/deltachat"
+import "github.com/deltachat/go-deltachat/deltachat"
 
 // Bot commands  should implement this interface
 type Command interface {
